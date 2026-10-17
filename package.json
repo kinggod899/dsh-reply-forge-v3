@@ -1,0 +1,40 @@
+{
+  "name": "@local/dsh-reply-forge-v3",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 桌面端插件 v3：直接写活会话（message projection），改完立即被大模型采信，不用重启；也可显式只落盘（重启后生效）",
+  "main": "./.dsh-plugin/index.mjs",
+  "exports": {
+    ".": "./.dsh-plugin/index.mjs",
+    "./client": "./.dsh-plugin/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "build": "node scripts/build-client.mjs",
+    "check": "node scripts/build-client.mjs --check",
+    "release": "node scripts/build-release.mjs v3.1.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kinggod899/dsh-reply-forge-v3.git"
+  },
+  "homepage": "https://github.com/kinggod899/dsh-reply-forge-v3#readme"
+}

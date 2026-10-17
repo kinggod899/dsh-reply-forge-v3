@@ -1,0 +1,26 @@
+# 依赖与临时产物
+node_modules/
+.diag-tmp/
+.diag-tmp-focus/
+
+# 本地记忆 / 开发笔记（含本机路径与账号信息，不随仓库分发）
+.workbuddy-ai/
+
+# 本地备份（会话文件备份、配置备份等）
+*.bak
+*.bak-*
+
+# 本地配置（本机路径，不随仓库分发）
+*.local.json
+
+# 系统杂物
+Thumbs.db
+desktop.ini
+.DS_Store
+scripts/diag.config.json
+
+# 构建产物（发行包 zip / 清单，由 build-release.mjs 生成）
+dist/
+
+# 私有逆向脚手架（含商业客户端渠道信息，仅本机保留，不随仓库分发）
+scripts/provider-oracle.mjs

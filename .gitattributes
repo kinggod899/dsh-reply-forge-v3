@@ -1,0 +1,7 @@
+# 统一行尾：仓库内文本一律 LF；.bat 必须 CRLF（Windows 批处理）
+# .bat 为 GBK 编码——eol 只管行尾，不动字节编码
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# 构建产物与本地私有配置不参与行尾归一以外的特殊处理
+.dsh-plugin/client.js text eol=lf

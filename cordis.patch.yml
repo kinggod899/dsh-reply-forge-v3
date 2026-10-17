@@ -1,0 +1,12 @@
+# dsh-reply-forge-v3 bundle patch：向 web 组合挂载「回复锻造 v3」插件。
+#
+# 与 v1（dsh-reply-forge）、v2（dsh-reply-forge-v2）**完全独立**：独立插件 id、
+# 独立客户端模块表条目、独立 localStorage 前缀（dsh-reply-forge-v3:*）、
+# 独立样式前缀（rf3-）。三代可以分别启用，但**不要同时启用**——它们共用同一条
+# 消息操作条，同时开会挂出多条（安装脚本默认会把更早的两代从 bundles 摘掉）。
+#
+# 只插入一个以插件 id 命名的条目，不修改任何既有条目，因此与其它插件
+# 共享同一份组合树时不会相互覆盖。
+- insert:
+    - id: dsh-reply-forge-v3
+      name: '@local/dsh-reply-forge-v3'
