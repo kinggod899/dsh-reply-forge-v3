@@ -5,18 +5,23 @@
 > [使用说明.md](./使用说明.md)，深度开发日志在
 > 开发期工作区记忆目录（不随仓库分发），项目级记忆在 `.workbuddy-ai/memory/`。
 
-## 当前状态（2026-10-17 复核）
+## 当前状态（2026-10-20 复核）
 
-- 版本 `3.1.0`；测试 **233 项 / 13 套**（10-18 实测：`node --test "tests/*.test.mjs"` 13/13 全绿；
-  其中 21 项需本机宿主包 `@deepseek-ai/dsh-session`，缺则 SKIP 不计失败——发行包在
-  没装 DSH 的机器上也能跑绿；client 套件 57 项，`build-client.mjs --check` 字节一致）。
+- 版本 `3.1.0`（**v3.2.0 待发**：两个 PR 已合并进 main，本机已装待用户真机测试）；
+  测试 **272 项 / 14 套**（10-20 实测：`node --test "tests/*.test.mjs"` 14/14 全绿；
+  其中 2 套（persistence/projection）需本机宿主包，缺则 SKIP 不计失败；client 套件 74 项，
+  `build-client.mjs --check` 字节一致）。
+- **仓库管理纪律（2026-10-20 用户拍板改）**：废除「main 单一干净 commit」，
+  改为常规多 commit + PR 流程。每个特性/修复各一个分支、一个 PR，合并用
+  **merge commit**（保留完整 commit message，不 squash、不重写公开历史）。
+  上个版本的脱敏历史（v3.1.0 之前的 orphan 重写）是既成事实，不再追溯。
 - **公开发布脱敏已完成（10-17 午间）**：`.gitignore` 补挡 `.diag-tmp-focus/`（63M 真宿主
   Edge profile，IndexedDB 里有真实会话内容）与 `.workbuddy-ai/`（项目记忆含账号信息）；
   TODO.md / 脚本 / bat / 探针里的一切本机路径改为环境变量 + 本地私有配置
   （`scripts/diag.config.json`、`tests/host-paths.local.json`，均被 gitignore）；
   `修复会话.bat` 按 GBK+CRLF 房规做了字节级手术删掉写死的 node 路径；补 `.gitattributes`
   统一行尾。fresh clone 全量门禁 13/13 通过、
-  集成套件无宿主时优雅 SKIP。**仓库已上线**（见下方待办 #5，历史为单一干净 commit）。
+  集成套件无宿主时优雅 SKIP。**仓库已上线**（见下方待办 #5，PR 流程见「当前状态」）。
 - 代码侧 P0/P1 已封口：`ignorable` shim + 每会话写句柄核验、真宿主持久化闭环、
   受损会话修复工具、文档安全断言纠偏。
 - **BUG-1 第四轮修复（10-17 下午）：锁定最大疑凶——native `window.confirm`。**
@@ -50,8 +55,9 @@
   package.json 补 `engines>=18` + scripts；「233 项全绿」口径区分 21 项 SKIP；
   README 瘦身门面化（细节归使用说明.md）；`scripts/provider-oracle.mjs`
   （含商业客户端渠道信息）从公开仓库撤下，本地保留。
-- 仓库已上线：公开 GitHub 仓库 `kinggod899/dsh-reply-forge-v3`，历史为单一干净
-  commit；v2 仓库独立维护，架构不同勿混用（README 内已互链）。
+- 仓库已上线：公开 GitHub 仓库 `kinggod899/dsh-reply-forge-v3`；v2 仓库独立维护，
+  架构不同勿混用（README 内已互链）。v3.1.0 发布时做过一次 orphan 历史重写（脱敏），
+  该段历史不可追溯也不必追溯；**此后一律走 PR 流程，不再重写**。
 
 ## 待办（按优先级）
 
@@ -59,12 +65,15 @@
 |---|---|---|---|
 | BUG-1 | 写入伪造保存后焦点未回到宿主输入框 / 打字无效 | ✅ 已修复，用户真机复验通过（10-18） | 疑凶=native confirm（已改页面内两步确认）+ 焦点三机制 + 点击保险 + bar 压层 |
 | BUG-2 | 写入伪造被 STALE_TARGET 拒绝（重启后必现） | ✅ 已修复，用户真机复验通过（10-18） | 根因=投影双口径；修复=读路过投影 + PATCHED_TARGET 拒绝 + 自动重试一次 |
+| BUG-3 | 插件整页失效、按钮全无，重启 DSH 才好 | ✅ 已修复（10-20，PR #2），待用户真机复验 | 根因=bootstrap interval 找到锚点即永久自停，锚点被宿主 reconcile 换掉后 observer 挂死；修复=常驻心跳 + focus/visibilitychange 唤醒 |
+| BUG-4 | 带代码块的回复没有「伪造」按钮，但编辑器里能调出 | ✅ 已修复（10-20，PR #2），待用户真机复验 | 根因=宿主代码块 banner 带复制 button，被 classify 的 ACTION_TAGS 当结构化控件整块拒绝；修复=豁免代码块外壳 + BLOCK_TAGS 计代码块为块级内容 |
 | 1 | 焦点修复真机复验：重启 DSH → 写入伪造 → 保存后直接打字 | ✅ 已验证通过（10-18） | 提示行显示「焦点已交还输入框」，可直接打字 |
 | 2 | 修复受损会话（`ignorable` 缺失的旧记录）：退出 DSH → `修复会话.bat` 诊断 → `apply` | ⬜ 待用户 | 原文件未动，工具已诊断命中 |
 | 3 | 真机验收矩阵：新/老会话 × 在线/落盘 | ⬜ 待用户 | 确认模型下一轮采信 |
 | 4 | 关插件重启回归：`关闭插件.bat` → 重启 → 会话可开、伪造退原文 | ⬜ 待用户 | 再 `启用插件.bat` 验恢复 |
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审 |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词、tarball 钉 v3.1.0；README 中英双版已加收录注记 |
+| 7 | **v3.2.0 发布**（inbox 队列编辑 + 两个 bug 修复） | 🔵 代码已合并（PR #1/#2），本机已装，待用户真机测试后发版 | 发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
 
 ## 不可破的规则（改代码前必读）
 
