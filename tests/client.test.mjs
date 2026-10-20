@@ -1617,6 +1617,194 @@ test('写入方式：选「仅在线」但会话不在内存里 → 宿主拒绝
     + JSON.stringify(editor.querySelectorAll('.rf3-note-warn').map(n => n.textContent)))
 })
 
+// ── E. 锚点换装自愈（真机 bug：插件整页失效、只有重启才好）───────────────
+//
+// 2026-10-19/20 真机复现（session-25eecb09…）：DSH 的 reconcile（HMR
+// teardown 半途 / 版本切换 / turn 折叠重挂）会把 [data-slot=
+// "main.conversation"] 锚点整体换掉，旧 MutationObserver 挂到脱离文档的
+// 节点上后再也不触发。旧代码的 bootstrap interval「找到锚点就 clearInterval」，
+// 锚点换掉后没有任何路径重连 → scan 停摆、按钮全没 → 只有重启 DSH 才好。
+// 修法：interval 永不停止，常驻心跳负责重连。
+
+test('宿主把会话锚点整体换掉 → 心跳重连 observer，新容器里的消息照样接管', async () => {
+  const { doc, win, flush, pending, conv, msgs, fetchImpl } = setup()
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  // apply 注册的 interval 回调此刻在 pending 里。先抓出来再 flush——
+  // flush 会消费掉它，而本测试要模拟「心跳又跑了一轮」。
+  const heartbeat = [...pending]
+  await tick(); flush()
+  assert.ok(msgs[0].hasAttribute('data-rf3-taken'), '首屏锚点里的消息必须被接管')
+
+  // 宿主 reconcile：旧锚点摘掉，装一个全新的（里面是一条新回复）
+  conv.remove()
+  const conv2 = mk('div')
+  conv2.setAttribute('data-slot', 'main.conversation')
+  conv2.setAttribute('data-conversation-session', 'test-session')
+  const fresh = mk('div', 'Kwoi6G_body')
+  fresh.append(mk('p', '', '新锚点里的回复'))
+  conv2.append(fresh)
+  doc.body.append(conv2)
+  assert.equal(doc.querySelector('[data-slot="main.conversation"]'), conv2, '新锚点必须成为唯一查询结果')
+
+  // 心跳跑一轮 → attachObserver 发现锚点变了 → 重连 + 立刻重扫
+  heartbeat.forEach(fn => fn())
+  await tick(); flush()
+  assert.ok(fresh.hasAttribute('data-rf3-taken'), '新锚点里的消息必须被接管（心跳重连）')
+  assert.ok(fresh.children.some(c => c.classList.contains('rf3-bar')), '新锚点里的消息必须挂上操作条')
+})
+
+test('窗口唤醒（focus / visibilitychange）也重连锚点', async () => {
+  const { doc, win, flush, conv, fetchImpl, dispatch } = setup()
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  conv.remove()
+  const conv2 = mk('div')
+  conv2.setAttribute('data-slot', 'main.conversation')
+  conv2.setAttribute('data-conversation-session', 'test-session')
+  const fresh = mk('div', 'Kwoi6G_body')
+  fresh.append(mk('p', '', '唤醒后的新消息'))
+  conv2.append(fresh)
+  doc.body.append(conv2)
+
+  // 后台 tab 挂起期间锚点被换；窗口重新获得焦点时主动重挂重扫
+  dispatch('focus')
+  await tick(); flush()
+  assert.ok(fresh.hasAttribute('data-rf3-taken'), 'focus 唤醒必须补齐接管')
+
+  // 再来一次 visibilitychange（doc 级监听，visibilityState 已默认可见）。
+  // 宿主是「换锚点」不是「加锚点」——先把上一个摘掉。
+  conv2.remove()
+  const conv3 = mk('div')
+  conv3.setAttribute('data-slot', 'main.conversation')
+  conv3.setAttribute('data-conversation-session', 'test-session')
+  const fresh3 = mk('div', 'Kwoi6G_body')
+  fresh3.append(mk('p', '', '可见性恢复后的新消息'))
+  conv3.append(fresh3)
+  doc.body.append(conv3)
+  doc._fire('visibilitychange')
+  await tick(); flush()
+  assert.ok(fresh3.hasAttribute('data-rf3-taken'), 'visibilitychange 唤醒必须补齐接管')
+})
+
+// ── F. 宿主代码块外壳（真机 bug：带代码块的回复没有编辑入口）─────────────
+//
+// 2026-10-20 真机（session-25eecb09-67c5-41e6-b5a5-8259dd11c898）：一条含
+// 围栏代码块的复盘回复，页面上没有「伪造」按钮，但在别的消息的编辑器里
+// 能调出它。根因有两条，都在这一节盯：
+//   1. 新宿主把 ``` 代码块渲染成 div.md-code-block，banner 里带一个复制
+//      <button>；classify 的 ACTION_TAGS 把 button 当「结构化动作」，
+//      连带整条自然语言正文被拒（与文件头「code/pre 误伤」同类过拟合）；
+//   2. 纯代码块消息的直接子元素一个块级标签都不沾，形状判定整体漏掉它。
+// DOM 形状照宿主 bundle（dsh-web-frontend MarkdownText / md-code-block）复刻。
+
+/** 造一个宿主围栏代码块：div.md-code-block > banner(复制按钮) + content(pre)。 */
+function mkCodeBlock(codeText) {
+  const block = mk('div', 'md-code-block')
+  block.setAttribute('data-line-numbers', '')
+  const bannerWrap = mk('div', 'bannerWrap')
+  const banner = mk('div', 'banner')
+  banner.setAttribute('data-code-block-banner', '')
+  const action = mk('div', 'action')
+  const copyBtn = mk('button', 'copyButton')
+  copyBtn._text = '复制'
+  action.append(copyBtn)
+  banner.append(action)
+  bannerWrap.append(banner)
+  const content = mk('div', 'content')
+  content.setAttribute('data-code-block-content', '')
+  const pre = mk('pre')
+  pre.append(mk('code', '', codeText))
+  content.append(pre)
+  block.append(bannerWrap, content)
+  return block
+}
+
+/** 造一个宿主助手消息：chat.node > body > div.markdown > 段块 + 代码块。 */
+function mkAssistantNode(parts) {
+  const node = mk('div')
+  node.setAttribute('data-slot', 'conversation.chat.node')
+  const body = mk('div', 'body')
+  const md = mk('div', 'markdown')
+  for (const part of parts) md.append(part)
+  body.append(md)
+  node.append(body)
+  return node
+}
+
+test('真机回归：含围栏代码块的回复必须能接管（复制按钮不是拒绝理由）', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+
+  const node = mkAssistantNode([
+    mk('p', '', '复盘开始：先说结论，这次的问题是插件突然失效，重启才好。'),
+    mkCodeBlock('tearDownEntryFiber()\nremoveOwnedStyles(id)'),
+    mk('p', '', '复盘结束：清理执行了，重装那一步没成。'),
+  ])
+  conv.append(node)
+  doc.body.append(conv)
+
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  const md = node.querySelector('.markdown')
+  assert.ok(md.hasAttribute('data-rf3-taken'), '含代码块的正文容器必须被接管')
+  assert.ok(md.children.some(c => c.classList.contains('rf3-bar')), '必须挂上操作条')
+})
+
+test('纯代码块回复：代码块 div 也算块级内容，不得整体漏掉', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+
+  const node = mkAssistantNode([mkCodeBlock('npm install dsh-reply-forge-v3')])
+  conv.append(node)
+  doc.body.append(conv)
+
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  const md = node.querySelector('.markdown')
+  assert.ok(md.hasAttribute('data-rf3-taken'), '纯代码块消息也必须被接管')
+})
+
+test('豁免只给代码块外壳：别处的真按钮仍然整块拒绝', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+
+  // 一个带批准按钮的容器（宿主授权卡片的形状）：按钮不在代码块外壳里
+  const node = mk('div')
+  node.setAttribute('data-slot', 'conversation.chat.node')
+  const body = mk('div', 'body')
+  const md = mk('div', 'markdown')
+  md.append(mk('p', '', '需要确认是否继续执行该命令，请点击下方按钮做出选择。'))
+  const approve = mk('button', 'approve')
+  approve._text = '批准'
+  md.append(approve)
+  body.append(md)
+  node.append(body)
+  conv.append(node)
+  doc.body.append(conv)
+
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  assert.equal(md.hasAttribute('data-rf3-taken'), false, '代码块之外的交互控件仍然拒绝接管')
+})
+
 // 执行（异步：落盘链路要走 promise）
 let failed = 0
 for (const t of tests) {

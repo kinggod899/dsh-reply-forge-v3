@@ -1815,15 +1815,34 @@ export function apply(ctx) {
     scheduleScan()
   }
 
-  // 会话区还没挂载时（首屏 / 版本切换），低频重试直到锚点出现
+  // 锚点重连的常驻心跳。**永不 clearInterval**——
+  //
+  // 旧代码「找到锚点就 clearInterval」是真机 bug「插件经常整页失效、
+  // 只有重启 DSH 才好」的直接根因：宿主 reconcile（HMR teardown 半途、
+  // 版本切换、turn 折叠重挂会话容器）会把 [data-slot="main.conversation"]
+  // 锚点整体换掉或短暂摘掉，旧 observer 挂到脱离文档的节点上后再也不会
+  // 触发，而 bootstrap interval 早已自停 → 没有任何路径重连 observer
+  // → scan 停摆、按钮全没。重启之所以能好：重启走 entries.start() 全新
+  // fiber，interval 重开、锚点重挂。
+  //
+  // attachObserver 内部有 `root === observedRoot` 早退，常驻成本就是
+  // 每秒一次 querySelector，可忽略。真机复现会话：
+  // session-25eecb09-67c5-41e6-b5a5-8259dd11c898（2026-10-19/20 反复出现）。
+  const BOOTSTRAP_INTERVAL_MS = 1000
   const bootstrap = window.setInterval(() => {
     attachObserver()
-    if (observedRoot !== null) {
-      window.clearInterval(bootstrap)
-      scheduleScan()
-    }
-  }, 600)
+  }, BOOTSTRAP_INTERVAL_MS)
   attachObserver()
+
+  // 窗口唤醒兜底：浏览器会挂起后台 tab 的定时器与 MutationObserver 回调，
+  // 挂起期间锚点可能已被替换。切窗口 / 最小级还原时主动重挂重扫，
+  // 不等下一个 DOM 变动来触发。
+  const onWake = () => { attachObserver(); scheduleScan() }
+  const onWakeVisibility = () => {
+    if (document.visibilityState === 'visible') onWake()
+  }
+  window.addEventListener('focus', onWake)
+  document.addEventListener('visibilitychange', onWakeVisibility)
   syncRecord()
 
   // 快捷键：Alt+Shift+E 编辑当前视图最后一条 AI 回复
@@ -1847,6 +1866,8 @@ export function apply(ctx) {
     if (observer !== null) observer.disconnect()
     window.removeEventListener('popstate', scheduleScan)
     window.removeEventListener('hashchange', scheduleScan)
+    window.removeEventListener('focus', onWake)
+    document.removeEventListener('visibilitychange', onWakeVisibility)
     window.removeEventListener('keydown', onKey)
     stripInjectedUI()
     // 放在 stripInjectedUI 之后：它内部的 closeEditor 也可能再装上保险丝，

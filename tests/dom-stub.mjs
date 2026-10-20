@@ -205,11 +205,20 @@ export function createDocument() {
   const head = new El('head')
   const body = new El('body')
   const documentElement = new El('html')
+  // document 级监听（visibilitychange 等）。与 createWindow 的 listeners
+  // 同一形状，collect 式：测试用 _fire 手动触发。
+  const listeners = {}
   // 注意：对象字面量里不能直接引用 doc 自身（TDZ），ownerDoc 一律在外层补。
   const doc = {
     head,
     body,
     activeElement: null,
+    visibilityState: 'visible',
+    _fire(type, ev = {}) {
+      for (const fn of [...(listeners[type] ?? [])]) fn(ev)
+    },
+    addEventListener: (t, fn) => { (listeners[t] ??= []).push(fn) },
+    removeEventListener: (t, fn) => { listeners[t] = (listeners[t] ?? []).filter(f => f !== fn) },
     createElement: t => new El(t, doc),
     createDocumentFragment: () => new El('#fragment', doc),
     querySelector: sel => head._q(sel)[0] ?? body._q(sel)[0] ?? null,
