@@ -149,13 +149,188 @@ function forgeOnce(editor) {
 
 const btn = (editor, label) => editor.querySelectorAll('button').find(b => b.textContent === label)
 
+// ── B. 待发送队列（inbox）编辑 ────────────────────────────────────────────
+//
+// 这批盯的是「零代价改写」那条出口：消息还没进日志，改它不产生事件、不动已
+// 提交字节。风险全在定位上——气泡 DOM 上没有任何 id 锚点，itemId 只能靠
+// 文本回匹，所以歧义必须拒绝、附件必须拒绝、定位失败必须不给输入框。
+
+/** 造一个宿主 UserStyleBubble 的最小形态（含时钟，验证它被剔除）。 */
+function makePendingBubble(text, clockText = '22:18') {
+  const row = mk('div', 'userRow')
+  row.setAttribute('data-pending-steering', '')
+  const stack = mk('div', 'userStack')
+  const body = mk('div', 'bubble')
+  body._text = text
+  stack.append(body)
+  if (clockText !== null) {
+    const clock = mk('span')
+    clock.setAttribute('data-clock', '')
+    clock._text = clockText
+    stack.append(clock)
+  }
+  row.append(stack)
+  return row
+}
+
+/** next-step 里的一条 user 行。 */
+const queueRow = (id, text) => ({ id, content: [{ type: 'text', text }], source: { kind: 'user' } })
+
+/** sessions 服务桩：binding 给一个带 inbox 投影与 updateQueue 的 session。 */
+function makeSessions(rows, opts = {}) {
+  const calls = []
+  const session = {
+    projections: {
+      faceOf: key => ({
+        getSnapshot: () => (key === 'inbox' ? { 'next-turn': [], 'next-step': rows } : undefined),
+      }),
+    },
+    updateQueue: async (itemId, action) => {
+      calls.push({ itemId, action })
+      if (opts.failWith !== undefined) return { ok: false, error: opts.failWith }
+      return { ok: true, value: { accepted: true } }
+    },
+  }
+  return { sessions: { binding: () => ({ session }) }, calls }
+}
+
+/** 挂好气泡并跑完扫描。 */
+async function withPending(text, rows, opts = {}) {
+  const { doc, win, flush, fetchImpl } = setup()
+  const bubble = makePendingBubble(text)
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  const { sessions, calls } = makeSessions(rows, opts)
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions })
+  await tick(); flush()
+  return { doc, bubble, calls, flush }
+}
+
+test('待发送气泡：宿主给了 sessions 服务才接管', async () => {
+  const { doc, win, flush, fetchImpl } = setup()
+  const bubble = makePendingBubble('待发送的句子')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  assert.equal(btn(bubble, '改待发送'), undefined, '没有 sessions 服务就不该出现入口')
+})
+
+test('待发送气泡：有服务就挂按钮，且不碰助手消息的接管链', async () => {
+  const { doc, win, flush, msg, fetchImpl } = setup()
+  const bubble = makePendingBubble('待发送的句子')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  const { sessions } = makeSessions([queueRow('q1', '待发送的句子')])
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions })
+  await tick(); flush()
+  assert.ok(btn(bubble, '改待发送') !== undefined, '气泡必须有编辑入口')
+  assert.ok(msg.hasAttribute('data-rf3-taken'), '助手消息块照旧接管')
+  assert.ok(!msg.hasAttribute('data-rf3-pending'), '助手块不该被误标成气泡')
+})
+
+test('待发送气泡：点开编辑器预填队列文本（时钟文本不混进来）', async () => {
+  const { bubble } = await withPending('帮我看看这段代码', [queueRow('q1', '帮我看看这段代码')])
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.ok(editor !== null, '必须打开编辑器')
+  assert.equal(editor.querySelector('textarea').value, '帮我看看这段代码')
+})
+
+test('待发送气泡：保存走官方 updateQueue，且只发 kind edit + 纯文本', async () => {
+  const { bubble, calls } = await withPending('改好的内容', [queueRow('q9', '改好的内容')])
+  btn(bubble, '改待发送').click()
+  const area = bubble.querySelector('.rf3-editor').querySelector('textarea')
+  area.value = '改好的内容 v2'
+  btn(bubble.querySelector('.rf3-editor'), '保存').click()
+  await tick()
+  assert.equal(calls.length, 1, '必须调一次 updateQueue')
+  assert.equal(calls[0].itemId, 'q9')
+  assert.deepEqual(calls[0].action, {
+    kind: 'edit',
+    content: [{ type: 'text', text: '改好的内容 v2' }],
+  })
+})
+
+test('待发送气泡：保存成功后编辑器关闭（inbox 投影会自己刷气泡）', async () => {
+  const { bubble } = await withPending('一句话', [queueRow('q1', '一句话')])
+  btn(bubble, '改待发送').click()
+  btn(bubble.querySelector('.rf3-editor'), '保存').click()
+  await tick()
+  assert.equal(bubble.querySelector('.rf3-editor'), null, '成功后编辑器必须关掉')
+})
+
+test('待发送气泡：保存失败保留编辑器与文案，允许改完重试', async () => {
+  const { bubble, calls } = await withPending('一句话', [queueRow('q1', '一句话')],
+    { failWith: { code: 'session/queue-item-not-found', message: 'gone' } })
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  const area = editor.querySelector('textarea')
+  area.value = '换个说法'
+  btn(editor, '保存').click()
+  await tick()
+  assert.equal(editor.querySelector('.rf3-editor'), null, '编辑器还在（没被关掉）')
+  // 状态行在卡片里（第一个 .rf3-hint 是标题「编辑待发送消息」，不是状态）。
+  assert.match(editor.textContent, /不在队列/)
+  assert.equal(btn(editor, '保存').disabled, false, '按钮必须放回来')
+  assert.equal(calls.length, 1)
+})
+
+test('待发送气泡：定位失败（气泡不在队列里）→ 只说明原因，不给输入框', async () => {
+  const { bubble } = await withPending('队列里没有这句话', [queueRow('q1', '别的内容')])
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.ok(editor !== null, '仍要给出反馈卡片')
+  assert.equal(editor.querySelector('textarea'), null, '定位不到就不给输入框')
+  assert.match(editor.textContent, /无法定位/)
+})
+
+test('待发送气泡：两条一字不差的相同文本 → 拒绝，不赌第一条', async () => {
+  const { bubble, calls } = await withPending('同一句', [queueRow('q1', '同一句'), queueRow('q2', '同一句')])
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.equal(editor.querySelector('textarea'), null, '歧义时不给输入框')
+  assert.match(editor.textContent, /多个相同/)
+  assert.equal(calls.length, 0, '一个 updateQueue 都不该发')
+})
+
+test('待发送气泡：带附件的行 → 拒绝，不静默丢附件', async () => {
+  const rows = [queueRow('q1', '看图')]
+  rows[0].content.push({ type: 'file', file: { name: 'a.png' } })
+  const { bubble, calls } = await withPending('看图', rows)
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.equal(editor.querySelector('textarea'), null)
+  assert.match(editor.textContent, /附件/)
+  assert.equal(calls.length, 0)
+})
+
+test('待发送气泡：上下文注入行不算用户消息，不许编辑', async () => {
+  const rows = [{ id: 'c1', content: [{ type: 'text', text: '注入的内容' }], source: { kind: 'context' } }]
+  const { bubble, calls } = await withPending('注入的内容', rows)
+  btn(bubble, '改待发送').click()
+  assert.match(bubble.querySelector('.rf3-editor').textContent, /无法定位/)
+  assert.equal(calls.length, 0)
+})
+
+test('待发送气泡：内容为空时不给保存（与服务端同判据）', async () => {
+  const { bubble, calls } = await withPending('有内容', [queueRow('q1', '有内容')])
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  editor.querySelector('textarea').value = '   '
+  btn(editor, '保存').click()
+  await tick()
+  assert.equal(calls.length, 0, '空白内容不该发请求')
+  assert.match(editor.textContent, /不能为空/)
+})
+
 // ── A. 渲染层回归 ───────────────────────────────────────────────────────────
 
 test('apply 注入样式并接管助手消息', async () => {
   const { doc, win, flush, msg, fetchImpl } = setup()
   const mod = loadPlugin(doc, win, fetchImpl)
   assert.equal(typeof mod.apply, 'function', 'apply 必须导出')
-  assert.deepEqual(mod.inject, ['slots'])
+  assert.deepEqual(mod.inject, ['slots', 'sessions'])
   mod.apply({ effect: () => {} })
   assert.ok(doc.querySelector('style[data-dsh-reply-forge-v3]') !== null, '样式必须注入')
   await tick(); flush()
@@ -363,6 +538,29 @@ test('偏好 enabled=false 时不接管，setEnabled 实时开/关', async () =>
   assert.ok(msg.hasAttribute('data-rf3-taken'), 'setEnabled(true) 后必须恢复接管')
   win.__dshReplyForgeV3.setEnabled(false)
   assert.equal(msg.querySelector('.rf3-bar'), null, 'setEnabled(false) 后操作条必须拆除')
+})
+
+test('待发送气泡：setEnabled(false) 后按钮与 class 一并拆干净', async () => {
+  const { doc, win, flush, msg, fetchImpl } = setup()
+  const bubble = makePendingBubble('待发送的句子')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  const { sessions } = makeSessions([queueRow('q1', '待发送的句子')])
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions })
+  await tick(); flush()
+  assert.ok(btn(bubble, '改待发送') !== undefined, '先接管上')
+
+  win.__dshReplyForgeV3.setEnabled(false)
+  assert.equal(bubble.querySelector('.rf3-pending-bar'), null, '按钮容器必须拆掉')
+  assert.equal(btn(bubble, '改待发送'), undefined, '按钮本身不得残留')
+  assert.equal(bubble.hasAttribute('data-rf3-pending'), false, '接管标记必须摘掉')
+  assert.ok(!bubble.classList.contains('rf3-pending'), '定位 class 不得残留')
+  // setEnabled(false) 的既有语义就是全拆（含助手消息的接管标记），
+  // 待发送气泡不是例外——这里钉住「一起拆」而不是「单独拆一半」。
+  assert.equal(msg.hasAttribute('data-rf3-taken'), false, '停用是全拆，气泡不该被漏下')
+  win.__dshReplyForgeV3.setEnabled(true)
+  flush()
+  assert.ok(btn(bubble, '改待发送') !== undefined, '重新启用后气泡入口要回来')
 })
 
 test('指纹重名：编辑器给共享覆盖警示，并说明落盘出口不受影响', async () => {

@@ -22,5 +22,9 @@ scripts/diag.config.json
 # 构建产物（发行包 zip / 清单，由 build-release.mjs 生成）
 dist/
 
+# 可选构建器（esbuild）的预览/临时产物：主产物仍是 .dsh-plugin/client.js
+.dsh-plugin/client.esbuild.js
+.dsh-plugin/.esbuild-tmp.cjs
+
 # 私有逆向脚手架（含商业客户端渠道信息，仅本机保留，不随仓库分发）
 scripts/provider-oracle.mjs

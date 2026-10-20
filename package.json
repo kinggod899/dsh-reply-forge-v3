@@ -29,6 +29,8 @@
     "test": "node --test \"tests/*.test.mjs\"",
     "build": "node scripts/build-client.mjs",
     "check": "node scripts/build-client.mjs --check",
+    "lint": "node scripts/lint-flat.mjs",
+    "build:esbuild": "node scripts/build-client-esbuild.mjs",
     "release": "node scripts/build-release.mjs v3.1.0"
   },
   "license": "MIT",
