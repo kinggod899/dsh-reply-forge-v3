@@ -42,6 +42,19 @@ const ACTION_TAGS = new Set(['button', 'input', 'select', 'textarea', 'iframe'])
 /** 插件自身注入的 UI 容器——分类时必须忽略，否则按钮会被自己挡回去。 */
 const OWN_UI_SELECTOR = '.rf3-bar, .rf3-editor'
 
+/**
+ * 宿主代码块的「外壳」：围栏代码块渲染时自带语言 banner 和**复制按钮**
+ * （宿主语义类名与 data 属性，非构建期哈希）。这些 button 是宿主代码块
+ * 的固定 UI，不是消息内容里的交互控件。
+ *
+ * 真机 bug（2026-10-20，session-25eecb09-67c5-41e6-b5a5-8259dd11c898）：
+ * 一条含围栏代码块的复盘回复整条没有编辑入口，而在别的消息的编辑器里
+ * 能调出它——根因就是 ACTION_TAGS 里的 'button' 把代码块 banner 的复制
+ * 按钮当成「结构化动作」，连带整条自然语言正文被拒。与文件头记录的
+ * 「code/pre 误伤带内联代码的回复」是同一类过拟合，只是换了个标签名。
+ */
+const CODE_CHROME_SELECTOR = '[data-code-block-banner], .md-code-block'
+
 /** 命令/路径形态：先剥离代码再匹配。 */
 const ACTION_SHAPE = [
   /^[A-Za-z]:\\/m,                       // Windows 绝对路径（行首）
@@ -82,12 +95,20 @@ export function classifyNaturalLanguage(el) {
     }
   }
 
-  // 2. 结构性元素：交互控件一律拒绝（忽略插件自身注入的 UI）
+  // 2. 结构性元素：交互控件一律拒绝。两类豁免：
+  //    - 插件自身注入的 UI（OWN_UI_SELECTOR）；
+  //    - 宿主代码块外壳的复制按钮（CODE_CHROME_SELECTOR，围栏代码块 banner）。
+  //    拿不到 closest 的合成节点按老规矩保守放行，不在这里误杀。
   let structural = null
   try {
     for (const tag of ACTION_TAGS) {
       const hit = el.querySelector(tag)
-      if (hit !== null && hit.closest?.(OWN_UI_SELECTOR) === null) { structural = tag; break }
+      if (hit === null) continue
+      if (typeof hit.closest !== 'function') continue
+      if (hit.closest(OWN_UI_SELECTOR) !== null) continue
+      if (hit.closest(CODE_CHROME_SELECTOR) !== null) continue
+      structural = tag
+      break
     }
   } catch {
     // 选择器异常按可编辑处理（保守：交给用户判断）

@@ -29,8 +29,14 @@ export const CONVERSATION_SELECTOR = '[data-slot="main.conversation"], [data-slo
 /** 每条聊天节点的官方槽位（当前宿主渲染的消息列表单元）。 */
 const CHAT_NODE_SELECTOR = '[data-slot="conversation.chat.node"]'
 
-/** 块级文本标签：markdown 渲染产物的形状。 */
-const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table'
+/**
+ * 块级文本标签：markdown 渲染产物的形状。
+ * 末两项是宿主围栏代码块的外壳（语义类名 / data 属性，非构建期哈希）：
+ * 新宿主把 ``` 代码块渲染成 div 而不是 pre，纯代码块消息的直接子元素
+ * 一个块级标签都不沾，会被形状判定整体漏掉（真机：只回一段代码的回复
+ * 没有编辑入口）。形态判定只是「收候选」，真正放行仍靠 classify。
+ */
+const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content]'
 
 /** 幂等标记：已接管的节点带此属性。 */
 export const TAKEN_ATTR = 'data-rf3-taken'

@@ -156,7 +156,13 @@ const CONVERSATION_SELECTOR = '[data-slot="main.conversation"], [data-slot="conv
 const CHAT_NODE_SELECTOR = '[data-slot="conversation.chat.node"]'
 
 
-const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table'
+
+
+
+
+
+
+const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content]'
 
 
 const TAKEN_ATTR = 'data-rf3-taken'
@@ -586,6 +592,19 @@ const ACTION_TAGS = new Set(['button', 'input', 'select', 'textarea', 'iframe'])
 const OWN_UI_SELECTOR = '.rf3-bar, .rf3-editor'
 
 
+
+
+
+
+
+
+
+
+
+
+const CODE_CHROME_SELECTOR = '[data-code-block-banner], .md-code-block'
+
+
 const ACTION_SHAPE = [
   /^[A-Za-z]:\\/m,                       
   /^\/(?:Users|home|usr|etc|var|opt)\//m, 
@@ -626,11 +645,19 @@ function classifyNaturalLanguage(el) {
   }
 
   
+  
+  
+  
   let structural = null
   try {
     for (const tag of ACTION_TAGS) {
       const hit = el.querySelector(tag)
-      if (hit !== null && hit.closest?.(OWN_UI_SELECTOR) === null) { structural = tag; break }
+      if (hit === null) continue
+      if (typeof hit.closest !== 'function') continue
+      if (hit.closest(OWN_UI_SELECTOR) !== null) continue
+      if (hit.closest(CODE_CHROME_SELECTOR) !== null) continue
+      structural = tag
+      break
     }
   } catch {
     
@@ -3200,14 +3227,33 @@ function apply(ctx) {
   }
 
   
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  const BOOTSTRAP_INTERVAL_MS = 1000
   const bootstrap = window.setInterval(() => {
     attachObserver()
-    if (observedRoot !== null) {
-      window.clearInterval(bootstrap)
-      scheduleScan()
-    }
-  }, 600)
+  }, BOOTSTRAP_INTERVAL_MS)
   attachObserver()
+
+  
+  
+  
+  const onWake = () => { attachObserver(); scheduleScan() }
+  const onWakeVisibility = () => {
+    if (document.visibilityState === 'visible') onWake()
+  }
+  window.addEventListener('focus', onWake)
+  document.addEventListener('visibilitychange', onWakeVisibility)
   syncRecord()
 
   
@@ -3231,6 +3277,8 @@ function apply(ctx) {
     if (observer !== null) observer.disconnect()
     window.removeEventListener('popstate', scheduleScan)
     window.removeEventListener('hashchange', scheduleScan)
+    window.removeEventListener('focus', onWake)
+    document.removeEventListener('visibilitychange', onWakeVisibility)
     window.removeEventListener('keydown', onKey)
     stripInjectedUI()
     
