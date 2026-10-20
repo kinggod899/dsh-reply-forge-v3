@@ -173,13 +173,25 @@ function makePendingBubble(text, clockText = '22:18') {
   return row
 }
 
-/** next-step 里的一条 user 行。 */
+/** next-step 里的一条 user 行（投影仓形状）。 */
 const queueRow = (id, text) => ({ id, content: [{ type: 'text', text }], source: { kind: 'user' } })
 
-/** sessions 服务桩：binding 给一个带 inbox 投影与 updateQueue 的 session。 */
+/** 投影仓行 → 瞬态队列镜像行（宿主 SessionQueueMirror 的形状）。 */
+const mirrorRowOf = row => ({
+  id: row.id,
+  placement: row.source?.kind === 'user' ? 'steering' : 'context',
+  content: row.content,
+  text: row.content?.map(b => (b.type === 'text' ? b.text : '')).join('') ?? '',
+})
+
+/**
+ * sessions 服务桩：binding 给一个带 inbox 投影、快照队列镜像与 updateQueue 的
+ * session。镜像行由投影行派生——真机上宿主就是这么两边同步的。
+ */
 function makeSessions(rows, opts = {}) {
   const calls = []
   const session = {
+    getSnapshot: () => ({ queue: rows.map(mirrorRowOf) }),
     projections: {
       faceOf: key => ({
         getSnapshot: () => (key === 'inbox' ? { 'next-turn': [], 'next-step': rows } : undefined),

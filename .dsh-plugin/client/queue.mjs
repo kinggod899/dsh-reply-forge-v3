@@ -9,14 +9,30 @@
 //
 // 接口全部来自宿主 @deepseek-ai/dsh-api-session-controller，三条路径都经
 // 真机源码核对过，不是照 README 抄：
-//   1. 读：session.projections.faceOf('inbox').getSnapshot()
-//      → { 'next-turn': [...], 'next-step': [...] }，值本身 optional。
-//      键名与行结构来自 lib/typert.host.js 的 zod schema 和 lib/index.js 的
-//      queueItemsFromInbox()，两处互相印证。
+//   1. 读：**两个源**，UI 真源优先——
+//      a. session.getSnapshot().queue（SessionQueueMirror，瞬态队列镜像）。
+//         宿主聊天界面渲染 pending 气泡的就是这一份
+//         （dsh-client-ui-chat：`const inbox = useSession(s => s.queue)`，
+//         再按 placement === 'steering' 过滤）。行形状
+//         {id, placement, rpcId?, content, preview, text}，其中
+//         placement: 'steering' = 气泡可见的插入消息，'queued' = next-turn
+//         排队（不渲染气泡），'context' = 上下文注入（不是用户消息）。
+//      b. session.projections.faceOf('inbox').getSnapshot()（持久投影仓）。
+//         行形状 {id, content, source: {kind, rpcId?}}，source.kind ===
+//         'user' 的 next-step 行同样就是气泡那条。
+//      两个源都拿不到才判「读不到」；任一有数据就合并（按 id 去重，镜像优先）。
 //   2. 定位：气泡 DOM 上**没有任何 id 类属性**（只有 data-pending-steering /
 //      data-submission-echo 两个布尔），所以 itemId 只能靠文本回匹。这是宿主
 //      的限制，不是我们偷懒。
 //   3. 写：session.updateQueue(itemId, { kind: 'edit', content: [...] })。
+//      宿主 handler 用 message.id 在 agent.inbox 里定位（index.js:828-842），
+//      两个源的 row.id 恰好都是 message.id，所以传给哪个源的 id 都成立。
+//
+// 为什么必须双源（2026-10-20 真机 bug）：投影仓的 'inbox' 行只靠控制流基线
+// seed 或 projection 帧推送，真机上出现过「气泡明明在，projections 的 'inbox'
+// 键却是 undefined」——入口一点就报「读不到待发送队列」。镜像那份由 queue
+// 帧驱动（replaceControl / handleControlFrame），与界面同源同刷新，
+// getSnapshot() 前还会 ensureFresh() 同步重建，所以拿它当第一源。
 
 /** inbox 投影键。 */
 export const INBOX_KEY = 'inbox'
@@ -51,15 +67,61 @@ export function normalizeInbox(snapshot) {
 }
 
 /**
- * 读当前会话的 inbox 投影。
+ * 读会话快照里的瞬态队列镜像（SessionQueueMirror）。
+ *
+ * 这是**界面上看得见的那一份**：宿主聊天界面渲染 pending 气泡的数据源就是
+ * `useSession(s => s.queue)`（dsh-client-ui-chat），本模块与界面同源，
+ * 不存在「气泡在、队列空」的错位。
+ *
+ * 行形状（client.js SessionQueueMirror.replace）：
+ *   { id, messageId, placement, rpcId?, content, preview, text }
+ * placement 三种：'steering'（气泡可见的插入消息，即 next-step 的 user 行）、
+ * 'queued'（next-turn 排队，不渲染气泡）、'context'（上下文注入，非用户消息）。
+ *
+ * @param {unknown} session ISession
+ * @returns {Array<{ slot: 'next-turn' | 'next-step', row: object }> | null}
+ *          null = 读不到快照（不是空队列）
+ */
+export function readQueueMirror(session) {
+  try {
+    if (session === null || typeof session !== 'object') return null
+    if (typeof session.getSnapshot !== 'function') return null
+    const snap = session.getSnapshot()
+    const queue = snap !== null && typeof snap === 'object' ? snap.queue : undefined
+    if (!Array.isArray(queue)) return null
+    const rows = []
+    for (const item of queue) {
+      if (item === null || typeof item !== 'object') continue
+      const id = typeof item.id === 'string' && item.id !== '' ? item.id : undefined
+      if (id === undefined) continue
+      const content = Array.isArray(item.content) ? item.content : []
+      // 归一成与投影行一致的内部形状，resolvePendingItem 不用关心来源。
+      const row = { id, content, source: { kind: PENDING_SOURCE_KIND } }
+      if (item.placement === 'steering') rows.push({ slot: 'next-step', row })
+      else if (item.placement === 'queued') rows.push({ slot: 'next-turn', row })
+      // placement === 'context'：上下文注入行，不是用户发的，跳过。
+    }
+    return rows
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 读持久投影仓里的 inbox 投影。
  *
  * faceOf 返回 identity-stable 的 face，**永远存在**（宿主导注释：absence is
  * an `undefined` snapshot, never a missing face），所以判空要落在 snapshot 上。
  *
- * @param {{ projections?: { faceOf?: Function } }} session ISession
- * @returns 归一后的队列，读不到返回 null
+ * 真机上这个源可能整键缺失（控制流基线 seed 时该会话的 agent loop 还没注册
+ * inbox 投影，此后又没有新的投影帧），表现就是「气泡在、投影 undefined」——
+ * 所以它只能是第二源，不能单独依赖。见 readQueueMirror 的说明。
+ *
+ * @param {unknown} session ISession
+ * @returns {Array<{ slot: 'next-turn' | 'next-step', row: object }> | null}
+ *          null = 读不到投影（不是空队列）
  */
-export function readInbox(session) {
+export function readInboxProjection(session) {
   try {
     const projections = session === null || session === undefined ? undefined : session.projections
     const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
@@ -67,11 +129,95 @@ export function readInbox(session) {
     const face = faceOf(INBOX_KEY)
     if (face === null || face === undefined) return null
     if (typeof face.getSnapshot !== 'function') return null
-    return normalizeInbox(face.getSnapshot())
+    const normalized = normalizeInbox(face.getSnapshot())
+    if (normalized === null) return null
+    const rows = []
+    for (const row of normalized.nextTurn) {
+      if (isPendingUserRow(row)) rows.push({ slot: 'next-turn', row })
+    }
+    for (const row of normalized.nextStep) {
+      if (isPendingUserRow(row)) rows.push({ slot: 'next-step', row })
+    }
+    return rows
   } catch {
     // 投影读失败与「队列为空」是两回事，但都只能让上层提示稍后再试。
     return null
   }
+}
+
+/**
+ * 读当前会话的待发送队列：镜像源优先，投影源兜底，按 id 去重合并。
+ *
+ * 两个源都读不到才返回 null（上层提示「读不到队列」）；任一可读就合并——
+ * 包括「可读但为空」（上层提示「定位不到」，与「读不到」是两种故障）。
+ *
+ * @param {unknown} session ISession
+ * @returns {{ nextTurn: unknown[], nextStep: unknown[] } | null}
+ */
+export function readInbox(session) {
+  const mirror = readQueueMirror(session)
+  const projection = readInboxProjection(session)
+  if (mirror === null && projection === null) return null
+  const seen = new Set()
+  const nextTurn = []
+  const nextStep = []
+  for (const { slot, row } of [...(mirror ?? []), ...(projection ?? [])]) {
+    if (seen.has(row.id)) continue
+    seen.add(row.id)
+    if (slot === 'next-turn') nextTurn.push(row)
+    else nextStep.push(row)
+  }
+  return { nextTurn, nextStep }
+}
+
+/**
+ * 读失败时的诊断快照（2026-10-20 真机 bug 的排查设施）。
+ *
+ * 只读不写、全部 try 兜底；产物给 console 和控制台诊断行，用来回答「到底哪一级
+ * 挂了」：session 拿没拿到、projections 在不在、投影仓有哪些键、inbox 键值是
+ * 什么、快照队列有幾行、两个源各读出幾条。
+ *
+ * @param {unknown} session resolveSession 的产物（可能是 null）
+ * @returns {Record<string, unknown>} 纯 JSON 可序列化对象
+ */
+export function queueDiag(session) {
+  const out = {}
+  try {
+    out.hasSession = session !== null && typeof session === 'object'
+    if (!out.hasSession) return out
+    out.ctor = typeof session.constructor?.name === 'string' ? session.constructor.name : '?'
+    out.hasGetSnapshot = typeof session.getSnapshot === 'function'
+    const projections = session.projections
+    out.projections = projections === null || projections === undefined ? 'absent' : typeof projections
+    out.faceOf = projections === null || projections === undefined ? 'absent' : typeof projections.faceOf
+    try {
+      const rows = projections?.rows
+      out.projectionKeys = rows instanceof Map ? [...rows.keys()] : 'no-rows'
+    } catch { out.projectionKeys = 'throw' }
+    try {
+      if (typeof projections?.faceOf === 'function') {
+        const face = projections.faceOf(INBOX_KEY)
+        out.face = face === null || face === undefined ? 'absent' : typeof face
+        const snap = typeof face?.getSnapshot === 'function' ? face.getSnapshot() : undefined
+        out.inboxSnapshot = snap === undefined ? 'undefined' : snap === null ? 'null' : typeof snap
+      } else {
+        out.face = 'absent'
+      }
+    } catch (error) {
+      out.inboxSnapshot = `throw:${String(error && error.message ? error.message : error)}`
+    }
+    try {
+      if (typeof session.getSnapshot === 'function') {
+        const snap = session.getSnapshot()
+        out.snapshotQueue = Array.isArray(snap?.queue)
+          ? snap.queue.map(item => (item && typeof item.placement === 'string' ? item.placement : '?')).join(',')
+          : 'not-array'
+      }
+    } catch { out.snapshotQueue = 'throw' }
+    out.mirrorRows = (readQueueMirror(session) ?? []).length
+    out.projectionRows = (readInboxProjection(session) ?? []).length
+  } catch { /* 诊断自身绝不影响主流程 */ }
+  return out
 }
 
 /** 取一行是否为「用户发的、显示成 pending 气泡」的 steering 行。 */

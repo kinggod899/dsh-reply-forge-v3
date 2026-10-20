@@ -30,7 +30,7 @@ import {
   recordNeedsRefresh, domSignatureOf,
 } from './record.mjs'
 import {
-  readInbox, resolvePendingItem, bubbleTextOf, submitQueueEdit,
+  readInbox, resolvePendingItem, bubbleTextOf, submitQueueEdit, queueDiag,
 } from './queue.mjs'
 
 export const name = 'dsh-reply-forge-v3'
@@ -862,22 +862,35 @@ function openQueueEditor(bubble, sessions, docOverride) {
   label.className = 'rf3-hint'
   label.textContent = '编辑待发送消息'
 
-  /** 定位或会话没就绪时：只留说明，不给输入框。 */
-  const failOpen = text => {
+  /** 定位或会话没就绪时：只留说明，不给输入框。附一行诊断（排查真机故障用）。 */
+  const failOpen = (text, diag) => {
     wrap.append(label, makeNote(doc, 'warn', text))
+    if (diag !== undefined) {
+      let line = ''
+      try { line = JSON.stringify(diag) } catch { line = String(diag) }
+      const note = makeNote(doc, 'info', '诊断：' + line)
+      note.setAttribute('data-rf3-queue-diag', '')
+      wrap.append(note)
+      try {
+        console.error('[rf3] 待发送队列读取失败：' + text, diag)
+        // 落一份到本地存储，真机上没开 devtools 也能事后取（diagnostics only）。
+        const store = doc.defaultView?.localStorage ?? (typeof localStorage !== 'undefined' ? localStorage : null)
+        store?.setItem('dsh-reply-forge-v3:queueDiag', JSON.stringify({ at: Date.now(), error: text, diag }))
+      } catch { /* 诊断渠道失败不影响提示 */ }
+    }
     bubble.append(wrap)
     openEditor = { wrap, doc, kind: 'queue', anchor: bubble }
   }
 
   const session = resolveSession(sessions, sessionId)
   if (session === null) {
-    failOpen('当前会话还没准备好，稍后再试')
+    failOpen('当前会话还没准备好，稍后再试', queueDiag(null))
     return
   }
   const inbox = readInbox(session)
   const resolved = resolvePendingItem(inbox, bubbleTextOf(bubble, PENDING_TEXT_SKIP))
   if (resolved.ok !== true) {
-    failOpen(resolved.error)
+    failOpen(resolved.error, queueDiag(session))
     return
   }
 
