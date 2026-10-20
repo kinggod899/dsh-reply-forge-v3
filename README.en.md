@@ -151,6 +151,33 @@ The host refuses to let `assistant/message` carry a surface replacement —
 carrying `sourceEventSeqs`. The two constraints are mutually exclusive; it always throws.
 The full argument, with host source evidence, is in [PLAN.md](./PLAN.md).
 
+## Three write paths, ordered by cost
+
+| Path | What it changes | Side effects |
+|---|---|---|
+| **Edit the pending queue** | a message not yet sent to the model (inbox) | **None** — the message never entered the log: no new event, no committed bytes touched, `sessionId` unchanged, provider cache untouched |
+| Online patch | a historical message in the session log | Appends a private event; KV cache after the edit point is invalidated |
+| On-disk rewrite | the session record file | Needs backup/restore; **a running host does not read the disk**, so the change only applies on next load |
+| Local-only render | only what the page shows | The model never sees it — pure sleight of hand |
+
+The first one was added after v3.1 and goes through the official
+`session.updateQueue(itemId, { kind: 'edit', content: [...] })`. Its entry point
+hangs on bubbles carrying `data-pending-steering` (messages injected as steering
+mid-turn; `next-turn` queued messages render no bubble, so users never see them
+and no entry is offered).
+
+**Locating the item is done by matching text, and that is a host limitation, not
+laziness**: the bubble DOM carries no id-like attribute at all (only the two
+booleans `data-pending-steering` / `data-submission-echo`), so `itemId` can only
+be found by comparing bubble text against queue row text. Consequently:
+
+- Several byte-identical matches → **refuse** and say so; never gamble on the first;
+- A row holding a non-text block (attachment) → **refuse**, because the server only accepts plain text and a silent rewrite would drop the attachment;
+- Locating fails → no input box at all, only an explanation, so you can never "save without knowing which row you changed".
+
+The error-code table was verified one by one against the host's `updateQueue`
+handler in `dsh-api-session-controller/lib/index.js` (lines 822-845) — nothing was copied from another plugin.
+
 The door the host *does* leave open is **message projection**: pure functions registered
 per event type, deciding at fold time what the model sees for a given seq. So v3 appends
 one private event, `reply-forge/patch` (pure log record, never enters the surface), and a
@@ -200,6 +227,18 @@ After touching `.dsh-plugin/client/*.mjs` you must rebuild the artifact
 (`node scripts/build-client.mjs` — a self-written inliner, zero dependencies, no JSX, no
 export default); `build.test.mjs` asserts artifact and source stay byte-identical
 (`npm run check`).
+
+Two extra guards and one alternative backend:
+
+| Command | What it does |
+|---|---|
+| `node scripts/lint-flat.mjs` | **Flatten guard**: checks for top-level identifiers that collide across client modules (flattening into a single file makes them silently overwrite each other — syntax checks cannot see it), plus syntax the inliner cannot handle |
+| `node scripts/build-client-esbuild.mjs` | **esbuild backend (optional)**: writes only a preview (`client.esbuild.js`) by default; add `--write` to replace the real artifact |
+
+`build-release.mjs` runs both guards before packing and aborts on failure. The esbuild
+output is verified **behaviourally equivalent** (57/57 client tests, same
+`{ name, inject, apply }` exports), but it needs `npx` to fetch the package, so the
+zero-dependency inliner remains the default. Switching is an explicit `--write`, not a slip.
 
 ## CLI (offline rewriting)
 

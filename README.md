@@ -148,6 +148,31 @@ v3 因此走了另一条路——自有事件 + 同类型 projection + `ignorabl
 
 完整论证、宿主源码证据、失败码表见 [PLAN.md](./PLAN.md)。
 
+### 三条写入出口，按代价从小到大
+
+| 出口 | 改的对象 | 副作用 |
+|---|---|---|
+| **改待发送队列** | 还没发给模型的消息（inbox） | **无**：消息未进日志，无新事件、不动已提交字节、`sessionId` 不变、provider 缓存不受影响 |
+| 在线 patch | 会话日志里的历史消息 | 追加自有事件；改动点之后的 KV 缓存作废 |
+| 落盘改写 | 会话记录文件 | 需备份还原；**运行中的宿主不读盘**，改了要下次载入才生效 |
+| 仅本机渲染 | 只有页面看得见 | 模型看不见，纯障眼法 |
+
+第一条是 v3.1 之后补的，走官方 `session.updateQueue(itemId, { kind: 'edit',
+content: [...] })`。入口挂在带 `data-pending-steering` 的气泡上（回合进行中
+以 steering 形式插入的消息；`next-turn` 排队消息不渲染气泡，用户看不见，所以
+不提供入口）。
+
+**定位方式是文本回匹，这是宿主的限制不是偷懒**：气泡 DOM 上没有任何 id 类
+属性（只有 `data-pending-steering` / `data-submission-echo` 两个布尔），
+`itemId` 只能拿气泡文本去比队列行文本。因此：
+
+- 匹到多条一字不差的相同文本 → **拒绝**并提示，不赌第一条；
+- 行内含非 text 块（附件）→ **拒绝**，因为服务端只接受纯文本，静默改写会丢附件；
+- 定位失败 → 不给输入框，只说明原因，避免「保存了却不知道改的是哪条」。
+
+错误码表逐个核对过宿主 `dsh-api-session-controller/lib/index.js` 的
+`updateQueue` handler（822-845 行），不是照抄别家插件。
+
 ## 测试
 
 ```bash
@@ -173,6 +198,19 @@ node tests/session-anatomy.test.mjs
 跑法：逐个 `node tests/<文件>`，或 `node --test "tests/*.test.mjs"` 看总门禁。改过
 `.dsh-plugin/client/*.mjs` 后必须重跑 `node scripts/build-client.mjs`（自研内联器，
 零依赖 / 无 JSX / 无 export default），`build.test.mjs` 会校验产物与源码一致。
+
+### 构建守卫与备选后端
+
+| 命令 | 作用 |
+|---|---|
+| `node scripts/build-client.mjs --check` | 产物与源码字节一致（改了源码没重建就失败） |
+| `node scripts/lint-flat.mjs` | **拍平守卫**：客户端模块的顶层标识符是否跨模块重名（拍平成单文件后会静默互相覆盖，语法检查抓不到），以及是否用了内联器不支持的语法 |
+| `node scripts/build-client-esbuild.mjs` | **esbuild 后端（可选）**：默认只写预览 `client.esbuild.js`，加 `--write` 才覆盖主产物 |
+
+`build-release.mjs` 出包前会强制跑前两道守卫，失败即中止、`dist/` 不动。
+esbuild 产物已实测与自研内联器**行为等价**（`tests/client.test.mjs` 57/57 全过，
+导出 `{ name, inject, apply }` 一致），但它需要 `npx` 联网取包，所以默认仍是
+零依赖的内联器；切换请当成一次显式决定（`--write`），不是手滑。
 
 ## 命令行（离线改写）
 

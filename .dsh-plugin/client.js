@@ -35,6 +35,19 @@ const CSS = `
 
 /* 消息容器需要定位上下文：只在被接管的容器上加，宿主其余节点不受影响 */
 .rf3-host{position:relative}
+
+/* 待发送气泡的入口。与 .rf3-bar 同一套悬浮显现思路，但挂在外侧（气泡是右
+   对齐的用户消息，塞在容器内部会压住宿主自己的 actions）。绝对定位移除
+   文档流，不会把下面的消息推走。 */
+.rf3-pending{position:relative}
+.rf3-pending-bar{
+  position:absolute;left:0;bottom:2px;transform:translateY(100%);z-index:5;
+  display:inline-flex;gap:4px;align-items:center;
+  opacity:0;pointer-events:none;
+  transition:opacity .14s;
+}
+.rf3-pending:hover > .rf3-pending-bar,
+.rf3-pending-bar:focus-within{opacity:1;pointer-events:auto}
 .rf3-host[data-rf3-edited]{box-shadow:inset 2px 0 0 color-mix(in srgb, #e0a34a 70%, transparent)}
 
 /* 编辑器要盖过操作条（bar z-index:5）——否则编辑器右上角的目标下拉被 bar
@@ -1059,6 +1072,325 @@ var normalizeText = __m_dsh_plugin_client_record_mjs.normalizeText;
 var forgeRecord = __m_dsh_plugin_client_record_mjs.forgeRecord;
 var recordNeedsRefresh = __m_dsh_plugin_client_record_mjs.recordNeedsRefresh;
 var domSignatureOf = __m_dsh_plugin_client_record_mjs.domSignatureOf;
+var __m_dsh_plugin_client_queue_mjs = (function(){ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const INBOX_KEY = 'inbox'
+
+
+
+
+
+
+
+
+
+const PENDING_SOURCE_KIND = 'user'
+
+
+
+
+
+
+
+
+
+
+
+
+function normalizeInbox(snapshot) {
+  if (snapshot === null || typeof snapshot !== 'object') return null
+  const value = snapshot
+  const nextTurn = Array.isArray(value['next-turn']) ? value['next-turn'] : []
+  const nextStep = Array.isArray(value['next-step']) ? value['next-step'] : []
+  return { nextTurn, nextStep }
+}
+
+
+
+
+
+
+
+
+
+
+function readInbox(session) {
+  try {
+    const projections = session === null || session === undefined ? undefined : session.projections
+    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
+    if (typeof faceOf !== 'function') return null
+    const face = faceOf(INBOX_KEY)
+    if (face === null || face === undefined) return null
+    if (typeof face.getSnapshot !== 'function') return null
+    return normalizeInbox(face.getSnapshot())
+  } catch {
+    
+    return null
+  }
+}
+
+
+function isPendingUserRow(row) {
+  if (row === null || typeof row !== 'object') return false
+  const source = row.source
+  if (source === null || typeof source !== 'object') return false
+  return source.kind === PENDING_SOURCE_KIND
+}
+
+
+function rowId(row) {
+  const id = row === null || row === undefined ? undefined : row.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+
+
+
+
+function rowContent(row) {
+  if (row === null || typeof row !== 'object') return []
+  const content = row.content
+  return Array.isArray(content) ? content : []
+}
+
+
+
+
+
+
+
+
+
+
+
+function contentText(blocks) {
+  let text = ''
+  let textOnly = true
+  if (!Array.isArray(blocks)) return { text, textOnly }
+  for (const block of blocks) {
+    if (block === null || typeof block !== 'object') { textOnly = false; continue }
+    const type = block.type
+    if (type === 'text') {
+      const value = block.text
+      if (typeof value === 'string') { text += value; continue }
+    }
+    
+    textOnly = false
+  }
+  return { text, textOnly }
+}
+
+
+function collapseWhitespace(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim()
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function bubbleTextOf(row, skipSelector = '[data-clock]') {
+  try {
+    if (row === null || row === undefined) return ''
+    if (typeof row.cloneNode !== 'function') return ''
+    const clone = row.cloneNode(true)
+    if (clone === null || clone === undefined) return ''
+    if (typeof clone.querySelectorAll !== 'function') return ''
+    const skip = typeof skipSelector === 'string' && skipSelector !== '' ? skipSelector : '[data-clock]'
+    for (const node of clone.querySelectorAll(skip)) node.remove()
+    const text = clone.textContent
+    return typeof text === 'string' ? text : ''
+  } catch {
+    return ''
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function resolvePendingItem(inbox, bubbleText) {
+  if (inbox === null) return { ok: false, error: '读不到待发送队列，请稍后重试' }
+  const raw = String(bubbleText ?? '')
+  const collapsed = collapseWhitespace(raw)
+
+  
+  let exact = []
+  
+  let fuzzy = []
+  for (const row of inbox.nextStep) {
+    if (!isPendingUserRow(row)) continue
+    const parts = contentText(rowContent(row))
+    if (parts.text === raw && raw !== '') exact.push({ row, parts })
+    else if (parts.text !== '' && collapseWhitespace(parts.text) === collapsed) fuzzy.push({ row, parts })
+  }
+
+  const picked = pickUnique(exact) ?? pickUnique(fuzzy)
+  if (picked === undefined) {
+    if (exact.length > 1 || fuzzy.length > 1) {
+      return { ok: false, error: '队列里有多个相同的待发送消息，无法定位，请在队列变化后重试' }
+    }
+    return { ok: false, error: '消息还在发送或已经变化，无法定位，请稍后重试' }
+  }
+  if (!picked.parts.textOnly) {
+    return { ok: false, error: '这条待发送消息含附件，暂不支持编辑' }
+  }
+  const itemId = rowId(picked.row)
+  if (itemId === undefined) {
+    return { ok: false, error: '无法定位这条待发送消息，请稍后重试' }
+  }
+  return { ok: true, itemId, text: picked.parts.text, textOnly: true }
+}
+
+
+
+
+
+function pickUnique(candidates) {
+  if (candidates.length !== 1) return undefined
+  const only = candidates[0]
+  if (only.parts.text === '') return undefined
+  return only
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function explainQueueError(code) {
+  switch (code) {
+    case 'session/queue-item-not-found':
+      return '这条消息已经不在队列里了（可能已发出）'
+    case 'session/attachment-invalid':
+      return '修改失败：队列编辑只能保存纯文本，附件会丢失'
+    case 'gateway/bad-request':
+      return '内容不能为空'
+    case 'session/steer-unavailable':
+      return '当前回合已经不能接受这条消息了'
+    default:
+      return undefined
+  }
+}
+
+
+
+
+
+
+
+
+
+
+function updateQueueFailure(result) {
+  if (result === null || result === undefined) return '保存失败，请稍后重试'
+  if (typeof result !== 'object') return '保存失败，请稍后重试'
+  const res = result
+  if (res.ok === true) return null
+  const error = res.error
+  if (error === null || typeof error !== 'object') {
+    
+    return '保存失败，请稍后重试'
+  }
+  const code = typeof error.code === 'string' ? error.code : undefined
+  const message = typeof error.message === 'string' ? error.message : ''
+  return explainQueueError(code) ?? (message !== '' ? message : '保存失败，请稍后重试')
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function submitQueueEdit(session, itemId, text) {
+  try {
+    if (session === null || session === undefined) return '当前会话还没准备好，稍后再试'
+    if (typeof session.updateQueue !== 'function') return '当前宿主版本不支持编辑待发送消息'
+    const result = await session.updateQueue(itemId, {
+      kind: 'edit',
+      content: [{ type: 'text', text }],
+    })
+    return updateQueueFailure(result)
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && typeof error.message === 'string'
+      ? error.message
+      : ''
+    return message !== '' ? message : '保存失败，请稍后重试'
+  }
+}
+
+ return { normalizeInbox: normalizeInbox, readInbox: readInbox, rowContent: rowContent, contentText: contentText, collapseWhitespace: collapseWhitespace, bubbleTextOf: bubbleTextOf, resolvePendingItem: resolvePendingItem, explainQueueError: explainQueueError, updateQueueFailure: updateQueueFailure, submitQueueEdit: submitQueueEdit, INBOX_KEY: INBOX_KEY, PENDING_SOURCE_KIND: PENDING_SOURCE_KIND } })();
+var readInbox = __m_dsh_plugin_client_queue_mjs.readInbox;
+var resolvePendingItem = __m_dsh_plugin_client_queue_mjs.resolvePendingItem;
+var bubbleTextOf = __m_dsh_plugin_client_queue_mjs.bubbleTextOf;
+var submitQueueEdit = __m_dsh_plugin_client_queue_mjs.submitQueueEdit;
+
 
 
 
@@ -1088,7 +1420,20 @@ var domSignatureOf = __m_dsh_plugin_client_record_mjs.domSignatureOf;
 const name = 'dsh-reply-forge-v3'
 
 
-const inject = ['slots']
+
+
+
+
+
+
+
+
+
+
+const inject = ['slots', 'sessions']
+
+
+let sessionsRef = null
 
 const SCAN_DEBOUNCE_MS = 220
 const EDIT_ATTR = 'data-rf3-edited'
@@ -1605,6 +1950,13 @@ function stripInjectedUI() {
     if (el.classList !== undefined && el.classList.contains('rf3-host')) el.classList.remove('rf3-host')
     for (const own of [...el.querySelectorAll('.rf3-bar, .rf3-editor, .rf3-note')]) own.remove()
   }
+  
+  
+  for (const el of [...document.querySelectorAll('[' + PENDING_TAKEN_ATTR + ']')]) {
+    el.removeAttribute(PENDING_TAKEN_ATTR)
+    if (el.classList !== undefined) el.classList.remove('rf3-pending')
+    for (const own of [...el.querySelectorAll('[data-rf3-pending-btn], .rf3-pending-bar, .rf3-editor, .rf3-note')]) own.remove()
+  }
 }
 
 
@@ -1823,6 +2175,212 @@ function attachBar(block, doc, getSessionId, prefs, match) {
     }, { 'data-active': true }))
   }
   return bar
+}
+
+
+
+
+
+
+
+const PENDING_TAKEN_ATTR = 'data-rf3-pending'
+
+
+const PENDING_BUBBLE_ATTR = 'data-pending-steering'
+
+
+
+
+
+
+
+
+const PENDING_TEXT_SKIP = '[data-clock], [data-rf3-pending-btn], .rf3-pending-bar, .rf3-editor, .rf3-note'
+
+
+
+
+
+
+
+
+
+function resolveSession(sessions, sessionId) {
+  if (isPlaceholderSession(sessionId)) return null
+  if (sessions === null || sessions === undefined) return null
+  if (typeof sessions.binding !== 'function') return null
+  try {
+    const binding = sessions.binding(sessionId)
+    if (binding === null || binding === undefined) return null
+    const session = binding.session
+    return session === null || session === undefined ? null : session
+  } catch {
+    return null
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+function openQueueEditor(bubble, sessions, docOverride) {
+  closeEditor({ refocus: false })
+  
+  
+  disarmTypingGuard()
+  const doc = docOverride ?? bubble.ownerDocument ?? document
+  const sessionId = currentSessionId(doc)
+
+  const wrap = doc.createElement('div')
+  wrap.className = 'rf3-editor'
+
+  const label = doc.createElement('div')
+  label.className = 'rf3-hint'
+  label.textContent = '编辑待发送消息'
+
+  
+  const failOpen = text => {
+    wrap.append(label, makeNote(doc, 'warn', text))
+    bubble.append(wrap)
+    openEditor = { wrap, doc, kind: 'queue', anchor: bubble }
+  }
+
+  const session = resolveSession(sessions, sessionId)
+  if (session === null) {
+    failOpen('当前会话还没准备好，稍后再试')
+    return
+  }
+  const inbox = readInbox(session)
+  const resolved = resolvePendingItem(inbox, bubbleTextOf(bubble, PENDING_TEXT_SKIP))
+  if (resolved.ok !== true) {
+    failOpen(resolved.error)
+    return
+  }
+
+  const area = doc.createElement('textarea')
+  area.value = resolved.text
+  area.spellcheck = false
+  area.setAttribute('aria-label', '编辑待发送消息')
+  
+  
+  
+  const reassertAreaFocus = () => {
+    try {
+      const active = doc.activeElement ?? null
+      if (active !== area && area.isConnected !== false) {
+        if (typeof area.focus === 'function') area.focus()
+      }
+    } catch {  }
+  }
+  area.addEventListener('mouseup', reassertAreaFocus)
+  area.addEventListener('click', reassertAreaFocus)
+
+  const row = doc.createElement('div')
+  row.className = 'rf3-row'
+
+  const status = doc.createElement('span')
+  status.className = 'rf3-hint'
+  status.textContent = '消息还没发给模型 · Ctrl+Enter 保存 · Esc 取消'
+
+  const saveBtn = makeButton(doc, '保存', '修改队列里这条待发送消息', () => submit())
+  const cancelBtn = makeButton(doc, '取消', '放弃修改', () => closeEditor())
+  row.append(status, saveBtn, cancelBtn)
+
+  area.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+      event.preventDefault()
+      submit()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      closeEditor()
+    }
+  })
+
+  let saving = false
+  const submit = async () => {
+    if (saving === true) return
+    const text = String(area.value ?? '')
+    
+    if (text.trim() === '') {
+      status.textContent = '内容不能为空'
+      return
+    }
+    saving = true
+    saveBtn.disabled = true
+    cancelBtn.disabled = true
+    status.textContent = '保存中…'
+    const failure = await submitQueueEdit(session, resolved.itemId, text)
+    if (failure === null) {
+      
+      closeEditor()
+      return
+    }
+    
+    
+    saving = false
+    saveBtn.disabled = false
+    cancelBtn.disabled = false
+    status.textContent = failure
+    try { area.focus() } catch {  }
+  }
+
+  wrap.append(label, area, row)
+  bubble.append(wrap)
+  openEditor = { wrap, doc, kind: 'queue', anchor: bubble }
+  try { area.focus() } catch {  }
+}
+
+
+
+
+
+
+
+function takePendingBubble(bubble, sessions, doc) {
+  if (bubble.hasAttribute(PENDING_TAKEN_ATTR)) return
+  bubble.setAttribute(PENDING_TAKEN_ATTR, '')
+  
+  
+  if (bubble.classList !== undefined) bubble.classList.add('rf3-pending')
+  const bar = doc.createElement('div')
+  bar.className = 'rf3-pending-bar'
+  const btn = makeButton(doc, '改待发送', '修改这条还没发给模型的消息', () => {
+    openQueueEditor(bubble, sessions, doc)
+  })
+  btn.setAttribute('data-rf3-pending-btn', '')
+  bar.append(btn)
+  bubble.append(bar)
+}
+
+
+
+
+
+
+
+
+function takePendingBubbles(doc) {
+  if (sessionsRef === null || sessionsRef === undefined) return
+  if (doc === null || doc === undefined) return
+  if (typeof doc.querySelectorAll !== 'function') return
+  try {
+    const bubbles = [...doc.querySelectorAll('[' + PENDING_BUBBLE_ATTR + ']')]
+    for (const bubble of bubbles) {
+      try {
+        takePendingBubble(bubble, sessionsRef, doc)
+      } catch (error) {
+        log('接管待发送气泡失败', error)
+      }
+    }
+  } catch {  }
 }
 
 
@@ -2487,6 +3045,10 @@ function scan(getSessionId, prefs, docOverride) {
 
   
   
+  takePendingBubbles(doc)
+
+  
+  
   
   if (refreshRecordRef !== null) {
     try { refreshRecordRef(sessionId, texts) } catch (error) { log('重读会话记录失败', error) }
@@ -2506,6 +3068,12 @@ function apply(ctx) {
   styleEl.setAttribute('data-plugin', 'dsh-reply-forge-v3')
   styleEl.textContent = CSS
   document.head.append(styleEl)
+
+  
+  
+  
+  const sessions = ctx === null || ctx === undefined ? null : (ctx.sessions ?? null)
+  sessionsRef = sessions
 
   let prefs = loadPrefs()
   let sessionId = currentSessionId(document)

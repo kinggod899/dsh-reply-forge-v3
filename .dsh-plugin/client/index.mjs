@@ -29,11 +29,27 @@ import {
   loadRecord, cachedRecord, resetCache, matchBlocks, normalizeText, forgeRecord,
   recordNeedsRefresh, domSignatureOf,
 } from './record.mjs'
+import {
+  readInbox, resolvePendingItem, bubbleTextOf, submitQueueEdit,
+} from './queue.mjs'
 
 export const name = 'dsh-reply-forge-v3'
 
-/** 依赖服务：槽位系统（仅用于等待宿主就绪，不注册条目）。 */
-export const inject = ['slots']
+/**
+ * 依赖服务：槽位系统（等待宿主就绪）+ sessions（读取待发送队列）。
+ *
+ * 加 'sessions' **不破坏「只注入，不注册」的纪律**：inject 是「声明要用哪个
+ * 服务」，注册是「往共享槽位塞 UI 条目」。我们仍然不往任何 UI 槽位注册东西，
+ * 只是在需要读 inbox 投影和调 updateQueue 时用这个服务，入口照旧全在 DOM 上。
+ *
+ * 另一个必须记住的约束：**ctx.<service> 只在 apply() 期可读**，slot 回调 /
+ * 事件处理器里再读会抛。所以 apply 里立刻把服务对象存进模块级 ref（见
+ * sessionsRef），handler 只碰那个变量。
+ */
+export const inject = ['slots', 'sessions']
+
+/** apply() 注入的 sessions 服务（模块级函数拿不到 apply 的 ctx）。 */
+let sessionsRef = null
 
 const SCAN_DEBOUNCE_MS = 220
 const EDIT_ATTR = 'data-rf3-edited'
@@ -550,6 +566,13 @@ function stripInjectedUI() {
     if (el.classList !== undefined && el.classList.contains('rf3-host')) el.classList.remove('rf3-host')
     for (const own of [...el.querySelectorAll('.rf3-bar, .rf3-editor, .rf3-note')]) own.remove()
   }
+  // 待发送气泡不是消息块，不带 TAKEN_ATTR，得单独拆：
+  // 停用后残留一个「改待发送」按钮是会真点出东西来的。
+  for (const el of [...document.querySelectorAll('[' + PENDING_TAKEN_ATTR + ']')]) {
+    el.removeAttribute(PENDING_TAKEN_ATTR)
+    if (el.classList !== undefined) el.classList.remove('rf3-pending')
+    for (const own of [...el.querySelectorAll('[data-rf3-pending-btn], .rf3-pending-bar, .rf3-editor, .rf3-note')]) own.remove()
+  }
 }
 
 /** 原文缓存：指纹 → 原文，供「还原」时重建。 */
@@ -768,6 +791,212 @@ function attachBar(block, doc, getSessionId, prefs, match) {
     }, { 'data-active': true }))
   }
   return bar
+}
+
+/**
+ * 待发送气泡的接管标记。
+ *
+ * 与 TAKEN_ATTR 分开：pending 气泡不是助手消息块，不该进 takeBlock 那条
+ * 接管链（那边的计数、指纹、定位全是围绕落盘记录设计的）。
+ */
+const PENDING_TAKEN_ATTR = 'data-rf3-pending'
+
+/** 宿主渲染 pending 气泡用的属性（dsh-client-ui-chat 的 UserStyleBubble）。 */
+const PENDING_BUBBLE_ATTR = 'data-pending-steering'
+
+/**
+ * 取气泡文本时要剔除的节点：宿主时钟 + **本插件注入的一切 UI**。
+ *
+ * 后者是必须的：编辑按钮和编辑器卡片就挂在气泡容器里，不剔除的话按钮一挂上，
+ * 按钮文字就成了「消息内容」的一部分，文本回匹从此永远失败。这与 ownText 用
+ * isOwnUi 跳过自有 UI 是同一条纪律。
+ */
+const PENDING_TEXT_SKIP = '[data-clock], [data-rf3-pending-btn], .rf3-pending-bar, .rf3-editor, .rf3-note'
+
+/**
+ * 取当前会话的 ISession。
+ *
+ * 三个可能扑空的地方都按「读不到」处理，让上层提示稍后再试：
+ *   1. sessionId 还是占位值（会话容器没挂出来）；
+ *   2. sessionsRef 没被 apply 注入（apply 失败 / 测试环境）；
+ *   3. binding 还没有 session（会话正在打开，投影还没就绪）。
+ */
+function resolveSession(sessions, sessionId) {
+  if (isPlaceholderSession(sessionId)) return null
+  if (sessions === null || sessions === undefined) return null
+  if (typeof sessions.binding !== 'function') return null
+  try {
+    const binding = sessions.binding(sessionId)
+    if (binding === null || binding === undefined) return null
+    const session = binding.session
+    return session === null || session === undefined ? null : session
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 打开待发送消息编辑器：把气泡就地换成 textarea，保存走官方 updateQueue。
+ *
+ * 与 openBlockEditor 的区别很大，原因就一句话：**消息还没进日志**。所以没有
+ * 两步确认、没有目标下拉、没有落盘出口、没有覆盖表——改它就是改「即将发生
+ * 的请求」，不存在投影失配、缓存作废、自造事件那一串后果，自然也不需要
+ * 为它们准备的防护。
+ *
+ * 定位放在打开时做：气泡文本 ↔ 队列行文本的回匹只有一次机会，用户开始打字
+ * 之后气泡与队列的关系就说不清了（宿主动态刷新队列）。定位失败就不给
+ * textarea，只说明原因——不给一个「保存了却不知道改的是哪条」的输入框。
+ */
+function openQueueEditor(bubble, sessions, docOverride) {
+  closeEditor({ refocus: false })
+  // 同 openBlockEditor：编辑器开着期间用户在 textarea 里打字是正经输入，
+  // 不能被「拉回宿主输入框」的保险丝干扰。
+  disarmTypingGuard()
+  const doc = docOverride ?? bubble.ownerDocument ?? document
+  const sessionId = currentSessionId(doc)
+
+  const wrap = doc.createElement('div')
+  wrap.className = 'rf3-editor'
+
+  const label = doc.createElement('div')
+  label.className = 'rf3-hint'
+  label.textContent = '编辑待发送消息'
+
+  /** 定位或会话没就绪时：只留说明，不给输入框。 */
+  const failOpen = text => {
+    wrap.append(label, makeNote(doc, 'warn', text))
+    bubble.append(wrap)
+    openEditor = { wrap, doc, kind: 'queue', anchor: bubble }
+  }
+
+  const session = resolveSession(sessions, sessionId)
+  if (session === null) {
+    failOpen('当前会话还没准备好，稍后再试')
+    return
+  }
+  const inbox = readInbox(session)
+  const resolved = resolvePendingItem(inbox, bubbleTextOf(bubble, PENDING_TEXT_SKIP))
+  if (resolved.ok !== true) {
+    failOpen(resolved.error)
+    return
+  }
+
+  const area = doc.createElement('textarea')
+  area.value = resolved.text
+  area.spellcheck = false
+  area.setAttribute('aria-label', '编辑待发送消息')
+  // 点击保险与 openBlockEditor 同源：真机上宿主会在 mousedown 之后把焦点
+  // 弄丢，导致「点进 textarea 不出光标」。只在确实丢了时补 focus，
+  // 不抢用户用键盘刻意放在别处的焦点。
+  const reassertAreaFocus = () => {
+    try {
+      const active = doc.activeElement ?? null
+      if (active !== area && area.isConnected !== false) {
+        if (typeof area.focus === 'function') area.focus()
+      }
+    } catch { /* 忽略 */ }
+  }
+  area.addEventListener('mouseup', reassertAreaFocus)
+  area.addEventListener('click', reassertAreaFocus)
+
+  const row = doc.createElement('div')
+  row.className = 'rf3-row'
+
+  const status = doc.createElement('span')
+  status.className = 'rf3-hint'
+  status.textContent = '消息还没发给模型 · Ctrl+Enter 保存 · Esc 取消'
+
+  const saveBtn = makeButton(doc, '保存', '修改队列里这条待发送消息', () => submit())
+  const cancelBtn = makeButton(doc, '取消', '放弃修改', () => closeEditor())
+  row.append(status, saveBtn, cancelBtn)
+
+  area.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+      event.preventDefault()
+      submit()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      closeEditor()
+    }
+  })
+
+  let saving = false
+  const submit = async () => {
+    if (saving === true) return
+    const text = String(area.value ?? '')
+    // 与服务端同一条判据（index.js 825 行：必须含非空白字符）。
+    if (text.trim() === '') {
+      status.textContent = '内容不能为空'
+      return
+    }
+    saving = true
+    saveBtn.disabled = true
+    cancelBtn.disabled = true
+    status.textContent = '保存中…'
+    const failure = await submitQueueEdit(session, resolved.itemId, text)
+    if (failure === null) {
+      // inbox 投影会自己刷新气泡，这里不需要重扫；焦点交还由 closeEditor 负责。
+      closeEditor()
+      return
+    }
+    // 失败要能把按钮放回来：定位失效（itemId 过期）是失败里最常见的，
+    // 用户改完文案重试一次往往就好了，不该被迫重开编辑器。
+    saving = false
+    saveBtn.disabled = false
+    cancelBtn.disabled = false
+    status.textContent = failure
+    try { area.focus() } catch { /* 忽略 */ }
+  }
+
+  wrap.append(label, area, row)
+  bubble.append(wrap)
+  openEditor = { wrap, doc, kind: 'queue', anchor: bubble }
+  try { area.focus() } catch { /* 忽略 */ }
+}
+
+/**
+ * 给一个 pending 气泡挂编辑入口。幂等：已接管就跳过。
+ *
+ * 宿主每次刷新队列都会重渲染这些气泡，所以接管必须像 takeBlock 一样可重复
+ * 执行——新节点没标记就接管，老节点有标记就跳过。
+ */
+function takePendingBubble(bubble, sessions, doc) {
+  if (bubble.hasAttribute(PENDING_TAKEN_ATTR)) return
+  bubble.setAttribute(PENDING_TAKEN_ATTR, '')
+  // 位置上下文单独加 class，不直接样式化宿主的 data-pending-steering
+  // （命名隔离纪律：我们的外观只由 rf3-* 类决定）。
+  if (bubble.classList !== undefined) bubble.classList.add('rf3-pending')
+  const bar = doc.createElement('div')
+  bar.className = 'rf3-pending-bar'
+  const btn = makeButton(doc, '改待发送', '修改这条还没发给模型的消息', () => {
+    openQueueEditor(bubble, sessions, doc)
+  })
+  btn.setAttribute('data-rf3-pending-btn', '')
+  bar.append(btn)
+  bubble.append(bar)
+}
+
+/**
+ * 扫描并接管页面上的待发送气泡。
+ *
+ * 蹭 scan 的现有节流，不另起调度器：宿主刷新队列和刷新消息流是同一批 React
+ * 渲染，多一个 observer 只会更吵。没有 sessions 服务时整段跳过——旧宿主上
+ * 这个入口根本不该出现。
+ */
+function takePendingBubbles(doc) {
+  if (sessionsRef === null || sessionsRef === undefined) return
+  if (doc === null || doc === undefined) return
+  if (typeof doc.querySelectorAll !== 'function') return
+  try {
+    const bubbles = [...doc.querySelectorAll('[' + PENDING_BUBBLE_ATTR + ']')]
+    for (const bubble of bubbles) {
+      try {
+        takePendingBubble(bubble, sessionsRef, doc)
+      } catch (error) {
+        log('接管待发送气泡失败', error)
+      }
+    }
+  } catch { /* 忽略 */ }
 }
 
 /**
@@ -1430,6 +1659,10 @@ function scan(getSessionId, prefs, docOverride) {
     }
   })
 
+  // 待发送气泡：与上面的助手块是两条互不相交的接管链（气泡是用户消息，
+  // 且只在回合进行中以 steering 形式出现）。没有 sessions 服务就整段跳过。
+  takePendingBubbles(doc)
+
   // 页面比记录新（新回复刚渲染进 DOM，宿主还没落盘 / 缓存是旧快照）→
   // 后台重读一次，读完会再进来自旋一轮把定位补上。见文件头部说明。
   // refreshRecordRef 由 apply() 注入（scan 是模块级函数，拿不到闭包状态）。
@@ -1451,6 +1684,12 @@ export function apply(ctx) {
   styleEl.setAttribute('data-plugin', 'dsh-reply-forge-v3')
   styleEl.textContent = CSS
   document.head.append(styleEl)
+
+  // sessions 服务必须在 apply 期取：宿主只在 apply() 的 ctx 上暴露服务，
+  // slot 回调 / 事件处理器里再读 ctx.<service> 会抛。存进 ref 供 handler 用。
+  // 宿主没给这个服务（旧版本）时留 null，队列编辑入口不出现，其余功能不受影响。
+  const sessions = ctx === null || ctx === undefined ? null : (ctx.sessions ?? null)
+  sessionsRef = sessions
 
   let prefs = loadPrefs()
   let sessionId = currentSessionId(document)

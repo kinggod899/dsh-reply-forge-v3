@@ -29,6 +29,19 @@ export const CSS = `
 
 /* 消息容器需要定位上下文：只在被接管的容器上加，宿主其余节点不受影响 */
 .rf3-host{position:relative}
+
+/* 待发送气泡的入口。与 .rf3-bar 同一套悬浮显现思路，但挂在外侧（气泡是右
+   对齐的用户消息，塞在容器内部会压住宿主自己的 actions）。绝对定位移除
+   文档流，不会把下面的消息推走。 */
+.rf3-pending{position:relative}
+.rf3-pending-bar{
+  position:absolute;left:0;bottom:2px;transform:translateY(100%);z-index:5;
+  display:inline-flex;gap:4px;align-items:center;
+  opacity:0;pointer-events:none;
+  transition:opacity .14s;
+}
+.rf3-pending:hover > .rf3-pending-bar,
+.rf3-pending-bar:focus-within{opacity:1;pointer-events:auto}
 .rf3-host[data-rf3-edited]{box-shadow:inset 2px 0 0 color-mix(in srgb, #e0a34a 70%, transparent)}
 
 /* 编辑器要盖过操作条（bar z-index:5）——否则编辑器右上角的目标下拉被 bar

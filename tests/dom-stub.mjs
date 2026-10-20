@@ -32,6 +32,21 @@ export class El {
   removeAttribute(k) { delete this.attrs[k] }
   hasAttribute(k) { return k in this.attrs }
 
+  /**
+   * 克隆节点。deep 时递归克隆子孙（真 DOM 的 cloneNode(true) 语义）。
+   * 供「提取气泡文本」这类路径用：它们靠克隆后摘除时钟节点来避免改动真实 DOM。
+   */
+  cloneNode(deep = false) {
+    const copy = new El(this.tagName, this.ownerDoc)
+    copy.attrs = { ...this.attrs }
+    copy._cls = new Set(this._cls)
+    copy._text = this._text
+    if (deep === true) {
+      for (const c of this.children) copy.append(c.cloneNode(true))
+    }
+    return copy
+  }
+
   append(...nodes) {
     for (const n of nodes) {
       if (typeof n === 'string') { this._text += n; continue }

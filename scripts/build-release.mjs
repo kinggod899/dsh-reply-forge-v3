@@ -35,6 +35,35 @@ if (tags.includes(tag) === false) {
   process.exit(1)
 }
 
+// ── 出包门禁（在动 dist/ 之前跑，失败即中止）──────────────────────────────
+// 为什么需要：包里装的是**已提交的** `.dsh-plugin/client.js`，而所有测试都跑在
+// 工作区上。源码改了忘记重建时，本地测试可能全绿（测的是旧产物），用户拿到的
+// 就是旧逻辑。这里用两道只读检查把这类事故挡在打包之前：
+//   1. `build-client --check`：产物与源码字节一致（改了源码没重建 → 失败）；
+//   2. `lint-flat`：客户端模块可安全拍平（跨模块顶层重名 → 失败）。
+// 二者都是幂等只读操作，不会改任何文件。
+const gates = [
+  ['build-client --check（产物必须与源码一致）', 'build-client.mjs', ['--check']],
+  ['lint-flat（客户端模块可安全拍平）', 'lint-flat.mjs', []],
+]
+for (const [label, script, args] of gates) {
+  try {
+    execFileSync(process.execPath, [join(root, 'scripts', script), ...args], { cwd: root, stdio: 'inherit' })
+  } catch {
+    console.error('出包门禁失败：' + label + '。dist/ 未动，先修好再出包。')
+    process.exit(1)
+  }
+}
+
+// 门禁查的是**工作区**，包里装的是**tag**。两者不一致时明确警告：
+// 允许「先出包再补提交」的流程，但不能让人以为包内容等于眼前的工作区。
+const dirty = execFileSync('git', ['status', '--porcelain', '--', '.dsh-plugin', 'scripts', 'package.json', 'cordis.patch.yml'], { cwd: root, encoding: 'utf8' })
+  .split('\n').filter(Boolean)
+if (dirty.length > 0) {
+  console.warn('警告：以下文件有未提交改动，包里装的仍是 tag 内容而非工作区版本：')
+  for (const line of dirty) console.warn('  ' + line)
+}
+
 rmSync(dist, { recursive: true, force: true })
 mkdirSync(dist, { recursive: true })
 const out = join(dist, name + '.zip')
