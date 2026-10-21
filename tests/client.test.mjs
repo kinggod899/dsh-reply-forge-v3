@@ -289,7 +289,9 @@ test('待发送气泡：定位失败（气泡不在队列里）→ 只说明原�
   const editor = bubble.querySelector('.rf3-editor')
   assert.ok(editor !== null, '仍要给出反馈卡片')
   assert.equal(editor.querySelector('textarea'), null, '定位不到就不给输入框')
-  assert.match(editor.textContent, /无法定位/)
+  // 队列里有行但都对不上：说清楚「都不是你点的这条」，别一句笼统的无法定位
+  // （2026-10-21 真机 bug：用户点的气泡已离队，旧文案把方向全带错了）。
+  assert.match(editor.textContent, /都不是你点的这条/)
 })
 
 test('待发送：投影空但本地回显在途 → 先等，落库后换成编辑器', async () => {
@@ -341,7 +343,7 @@ test('待发送：回显从未出现且投影空 → 判定无法定位，不进
   btn(bubble, '改待发送').click()
   const editor = bubble.querySelector('.rf3-editor')
   assert.equal(editor.querySelector('textarea'), null, '没有在途信号就不等')
-  assert.match(editor.textContent, /无法定位/)
+  assert.match(editor.textContent, /已经不在队列里/)
 })
 
 test('待发送气泡：两条一字不差的相同文本 → 拒绝，不赌第一条', async () => {
@@ -368,8 +370,82 @@ test('待发送气泡：上下文注入行不算用户消息，不许编辑', as
   const rows = [{ id: 'c1', content: [{ type: 'text', text: '注入的内容' }], source: { kind: 'context' } }]
   const { bubble, calls } = await withPending('注入的内容', rows)
   btn(bubble, '改待发送').click()
-  assert.match(bubble.querySelector('.rf3-editor').textContent, /无法定位/)
+  assert.match(bubble.querySelector('.rf3-editor').textContent, /不是待发送的用户消息/)
   assert.equal(calls.length, 0)
+})
+
+// ── 强锚点（接管时预取 itemId，点击时按 id 复核，2026-10-21 三修）──────────
+
+test('待发送气泡：接管时预取锚点，投影行文本被宿主改过也照样定位', async () => {
+  // 气泡接管瞬间行文本与气泡一致（预取到 s1）；点击前行文本被改掉——严格
+  // 文本回匹会失败，强锚点按 id 复核仍能定位，编辑器预填**行的当前文本**。
+  const { doc, win, flush, fetchImpl } = setup()
+  const bubble = makePendingBubble('原来的话')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  let edited = false
+  const session = {
+    getSnapshot: () => ({ pendingSubmissions: [] }),
+    projections: {
+      faceOf: key => ({
+        getSnapshot: () => (key === 'inbox'
+          ? { 'next-turn': [], 'next-step': [queueRow('s1', edited ? '宿主改过的话' : '原来的话')] }
+          : undefined),
+      }),
+    },
+    updateQueue: async () => ({ ok: true, value: {} }),
+  }
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions: { binding: () => ({ session }) } })
+  await tick(); flush()
+  edited = true
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.ok(editor.querySelector('textarea') !== null, '锚点有效必须直接开编辑器')
+  assert.equal(editor.querySelector('textarea').value, '宿主改过的话')
+})
+
+test('待发送气泡：锚点失效（行已被 claim 离队）→ 说出真相并认出已发送气泡', async () => {
+  // 复刻真机诊断：接管时投影里有用户行（气泡就是它渲染的），点击时回合结束
+  // claim 把它带走、插件又补了一条非 user 行；React 还没重渲染，用户点了旧气泡。
+  const { doc, win, flush, fetchImpl } = setup()
+  const bubble = makePendingBubble('已经发出去的消息')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  // 对话里已有同文本的已发送用户气泡（普通用户消息，无 pending 标记）。
+  const sent = mk('div', 'cJsG2q_userRow')
+  sent.append(mk('div', 'bubble', '已经发出去的消息'))
+  doc.querySelector('[data-conversation-session]').append(sent)
+  let claimed = false
+  const session = {
+    getSnapshot: () => ({ pendingSubmissions: [] }),
+    projections: {
+      faceOf: key => ({
+        getSnapshot: () => (key === 'inbox'
+          ? {
+              'next-turn': [],
+              'next-step': claimed
+                ? [{ id: 'p1', content: [{ type: 'text', text: '预置跟进指令' }], source: { kind: 'preset' } }]
+                : [queueRow('s1', '已经发出去的消息')],
+            }
+          : undefined),
+      }),
+    },
+    updateQueue: async () => ({ ok: true, value: {} }),
+  }
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions: { binding: () => ({ session }) } })
+  await tick(); flush()
+  claimed = true
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.equal(editor.querySelector('textarea'), null, '定位不到就不给输入框')
+  const text = editor.textContent
+  assert.match(text, /都不是你点的这条/, '要说清队列里剩下的不是这条')
+  assert.match(text, /已经发送成功/, '要认出对话里已有的同文本已发送气泡')
+  const diag = JSON.parse(editor.querySelector('[data-rf3-queue-diag]').textContent.replace(/^诊断：/, ''))
+  assert.equal(diag.anchor.itemId, 's1', '诊断要带上失效锚点的 id')
+  assert.equal(diag.sentInTranscript, true)
+  assert.equal(diag.nextStepRows.length, 1)
+  assert.equal(diag.nextStepRows[0].kind, 'preset', '诊断要列出点击时刻投影行的 kind')
 })
 
 test('待发送气泡：内容为空时不给保存（与服务端同判据）', async () => {

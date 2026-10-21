@@ -12,9 +12,10 @@
 import assert from 'node:assert/strict'
 import { mk } from './dom-stub.mjs'
 import {
-  normalizeInbox, readInbox, readInboxProjection, queueDiag,
+  normalizeInbox, readInbox, readInboxProjection, readInboxRows, queueDiag,
   contentText, bubbleTextOf, collapseWhitespace,
-  resolvePendingItem, explainQueueError, updateQueueFailure, submitQueueEdit,
+  resolvePendingItem, resolvePendingItemById, hasTextMatchRow, describeInboxRows,
+  explainQueueError, updateQueueFailure, submitQueueEdit,
   readPendingEchoes, hasPendingEcho,
 } from '../.dsh-plugin/client/queue.mjs'
 
@@ -97,6 +98,36 @@ test('读取：session / projections 缺失 → null', () => {
 test('读取：face 没有 getSnapshot → null', () => {
   const session = { projections: { faceOf: () => ({}) } }
   assert.equal(readInbox(session), null)
+})
+
+// ── readInboxRows（不过滤 kind 的原始 next-step 行，2026-10-21 三修）────────
+
+test('原始行：不过滤 kind，next-step 全部行都返回（含插件注入行）', () => {
+  const session = {
+    projections: {
+      faceOf: key => ({
+        getSnapshot: () => key === 'inbox'
+          ? {
+              'next-turn': [userRow('t1', '排队')],
+              'next-step': [userRow('s1', '用户消息'), { id: 'p1', content: [{ type: 'text', text: '注入' }], source: { kind: 'preset' } }],
+            }
+          : undefined,
+      }),
+    },
+  }
+  const rows = readInboxRows(session)
+  assert.equal(rows.length, 2, 'next-step 全部行都在')
+  assert.equal(rows[0].id, 's1')
+  assert.equal(rows[1].source.kind, 'preset')
+  // 与 readInbox 的分工：一个给锚点/诊断，一个给严格回匹。
+  assert.equal(readInbox(session).length, 1)
+})
+
+test('原始行：投影读不到 → null（与 readInbox 同判据）', () => {
+  assert.equal(readInboxRows(null), null)
+  assert.equal(readInboxRows({}), null)
+  const session = { projections: { faceOf: () => ({ getSnapshot: () => undefined }) } }
+  assert.equal(readInboxRows(session), null)
 })
 
 // ── 本地发送回显（消息在途，2026-10-21 真机 bug 的在途检测）───────────────
@@ -219,6 +250,44 @@ test('诊断：queueDiag 产出纯 JSON、不抛，含关键字段', () => {
   assert.doesNotThrow(() => JSON.stringify(diag))
   assert.deepEqual(queueDiag(null), { hasSession: false })
   assert.doesNotThrow(() => queueDiag({}))
+})
+
+test('诊断：三修新增字段——行的速写、回显分布、promptError、锚点', () => {
+  const session = {
+    getSnapshot: () => ({
+      pendingSubmissions: [echoRow('r1', '甲'), echoRow('r2', '乙', { placement: 'queued' })],
+      promptError: { op: 'send', error: { code: 'agent-busy', message: 'busy' } },
+    }),
+    projections: {
+      rows: new Map(),
+      seqOf: () => 7,
+      faceOf: () => ({
+        getSnapshot: () => ({
+          'next-turn': [],
+          'next-step': [
+            userRow('s1', '甲'),
+            { id: 'p1', content: [{ type: 'text', text: '注入' }], source: { kind: 'preset' } },
+          ],
+        }),
+      }),
+    },
+  }
+  const diag = queueDiag(session, {
+    sessionId: 'sess-2', bubbleKind: 'host', bubbleTextHead: '甲',
+    anchor: { itemId: 's1' }, sentInTranscript: true,
+  })
+  // next-step 每行的速写：真机分歧点（有行但过滤后为 0）就靠它看出来。
+  assert.equal(diag.nextStepRows.length, 2)
+  assert.equal(diag.nextStepRows[0].kind, 'user')
+  assert.equal(diag.nextStepRows[1].kind, 'preset')
+  assert.equal(diag.nextStepRows[1].head, '注入')
+  // 回显按 placement 分布：queued 不渲染气泡，但要能在诊断里看见。
+  assert.deepEqual(diag.subPlacements, { total: 2, steering: 1, queued: 1, transcript: 0, other: 0 })
+  assert.equal(diag.promptError, 'agent-busy')
+  assert.deepEqual(diag.anchor, { itemId: 's1' })
+  assert.equal(diag.sentInTranscript, true)
+  assert.equal(diag.bubbleTextHead, '甲')
+  assert.doesNotThrow(() => JSON.stringify(diag))
 })
 
 // ── contentText ───────────────────────────────────────────────────────────
@@ -370,6 +439,74 @@ test('定位：行 id 不是字符串 → 拒绝', () => {
   const out = resolvePendingItem(inboxOf(bad), '甲')
   assert.equal(out.ok, false)
   assert.match(out.error, /无法定位/)
+})
+
+// ── 强锚点：resolvePendingItemById（接管时预取，点击时按 id 复核）──────────
+
+test('锚点：id 命中 → 直接定位，预填行的当前文本', () => {
+  const rows = [userRow('s1', '现在的文本'), userRow('s2', '别的')]
+  const res = resolvePendingItemById(rows, 's1')
+  assert.deepEqual(res, { ok: true, itemId: 's1', text: '现在的文本', textOnly: true })
+})
+
+test('锚点：id 不在队列里 → 明确说已经不在队列（回合结束被 claim）', () => {
+  const res = resolvePendingItemById([userRow('s2', '别的')], 's1')
+  assert.equal(res.ok, false)
+  assert.match(res.error, /已经不在队列里/)
+})
+
+test('锚点：行带附件 → 拒绝，不静默丢附件', () => {
+  const res = resolvePendingItemById([fileRow('s1', '看图')], 's1')
+  assert.equal(res.ok, false)
+  assert.match(res.error, /附件/)
+})
+
+test('锚点：rows 为 null / itemId 不是字符串 → 拒绝', () => {
+  assert.equal(resolvePendingItemById(null, 's1').ok, false)
+  assert.equal(resolvePendingItemById([userRow('s1', '甲')], 7).ok, false)
+  assert.equal(resolvePendingItemById([userRow('s1', '甲')], '').ok, false)
+})
+
+// ── hasTextMatchRow（失败文案指路：文本对不上还是 kind 被滤掉）──────────────
+
+test('同文本行：kind 不设限，注入行也算命中（只为区分失败原因）', () => {
+  const rows = [{ id: 'c1', content: [{ type: 'text', text: '注入的内容' }], source: { kind: 'context' } }]
+  assert.equal(hasTextMatchRow(rows, '注入的内容'), true)
+})
+
+test('同文本行：折叠空白后相等也算', () => {
+  const rows = [userRow('s1', '甲 乙')]
+  assert.equal(hasTextMatchRow(rows, '甲  乙'), true)
+})
+
+test('同文本行：没有命中 / 空文本 / null → false', () => {
+  assert.equal(hasTextMatchRow([userRow('s1', '别的')], '甲'), false)
+  assert.equal(hasTextMatchRow([userRow('s1', '甲')], ''), false)
+  assert.equal(hasTextMatchRow(null, '甲'), false)
+})
+
+// ── describeInboxRows（诊断：点击时刻投影里到底有谁）────────────────────────
+
+test('诊断速写：列出每行的 id / kind / 文本头，单行坏掉不影响其它行', () => {
+  const rows = [
+    userRow('s1', '用户消息'),
+    { id: 'p1', content: [{ type: 'text', text: '预置跟进' }], source: { kind: 'preset' } },
+    { id: 'bad', content: [{ type: 'text', text: 'x' }], get source() { throw new Error('boom') } },
+    { id: 'nosrc', content: [{ type: 'text', text: 'y' }] },
+  ]
+  const out = describeInboxRows(rows)
+  assert.equal(out.length, 4)
+  assert.equal(out[0].id, 's1')
+  assert.equal(out[0].kind, 'user')
+  assert.equal(out[1].kind, 'preset')
+  assert.equal(out[1].head, '预置跟进')
+  assert.equal(out[2].kind, 'throw', '读 source 抛异常要能看出来')
+  assert.equal(out[3].kind, 'absent')
+})
+
+test('诊断速写：null → unreadable（与空数组区分开）', () => {
+  assert.equal(describeInboxRows(null), 'unreadable')
+  assert.deepEqual(describeInboxRows([]), [])
 })
 
 // ── explainQueueError ─────────────────────────────────────────────────────
