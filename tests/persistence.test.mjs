@@ -54,7 +54,13 @@ if (sessionPkg === null || persistencePkg === null || jsonlPkg === null || cordi
 
 const { Session, SessionId, SessionStore, SessionLogOffset } = await import(toFileUrl(sessionPkg))
 const { validateStoredEvents } = await import(toFileUrl(persistencePkg))
-const { default: JsonlSessionPersistence } = await import(toFileUrl(jsonlPkg))
+// 导出形状按宿主版本分两种：真宿主（app.asar 提取）是命名导出
+// {apply, name, Config, JsonlCompressionSchema}；旧副本是 default 导出。
+// 两种都接——Cordis 的 ctx.plugin 认「带 apply 的对象」，整个模块命名空间即可。
+// （2026-10-21 首次对真宿主跑本套件时发现的形状差：default 导入拿到 undefined，
+//  报「invalid plugin, expect function or object with an "apply" method」。）
+const jsonlModule = await import(toFileUrl(jsonlPkg))
+const JsonlSessionPersistence = jsonlModule.default ?? jsonlModule
 const { Context } = await import(toFileUrl(cordisPkg))
 console.log('  宿主包：OK（cordis + jsonl 后端 + session store）\n')
 
