@@ -182,16 +182,29 @@ const queueRow = (id, text) => ({ id, content: [{ type: 'text', text }], source:
  * 以**真实桌面端宿主**为准：getSnapshot() 没有 queue 字段（那是旧副本），
  * pendingSubmissions 是本地回显。回显由 opts.echoes 给，默认空。
  */
+/**
+ * 按宿主形状的投影仓：`faceOf` 是 class 方法、内部用 `this`，`getSnapshot()`
+ * 每次读当前值（宿主由投影帧驱动，测试用闭包翻旗模拟）。
+ *
+ * 2026-10-21 真机 bug 四修：之前的桩用箭头函数（不碰 this），unbound 调用
+ * 在桩里能跑、在真机上必抛 TypeError 被 try/catch 吞成 null——「诊断读到 1 行、
+ * 读取返回 0 行」的灵异矛盾全是它。所有涉及投影的 client 测试从此走这个桩。
+ */
+class HostProjectionStore {
+  constructor(snapshotOf) { this._snapshotOf = snapshotOf }
+  faceOf(key) {
+    return { getSnapshot: () => this._snapshotOf(key) }
+  }
+}
+
 function makeSessions(rows, opts = {}) {
   const calls = []
   const echoes = opts.echoes ?? []
   const session = {
     getSnapshot: () => ({ pendingSubmissions: echoes.map(e => ({ ...e, placement: 'steering', time: 1 })) }),
-    projections: {
-      faceOf: key => ({
-        getSnapshot: () => (key === 'inbox' ? { 'next-turn': [], 'next-step': rows } : undefined),
-      }),
-    },
+    projections: new HostProjectionStore(key => key === 'inbox'
+      ? { 'next-turn': [], 'next-step': rows }
+      : undefined),
     updateQueue: async (itemId, action) => {
       calls.push({ itemId, action })
       if (opts.failWith !== undefined) return { ok: false, error: opts.failWith }
@@ -307,13 +320,9 @@ test('待发送：投影空但本地回显在途 → 先等，落库后换成编
         ? []
         : [{ requestId: 'r1', placement: 'steering', time: 1, text: '在途消息', attachments: [] }],
     }),
-    projections: {
-      faceOf: key => ({
-        getSnapshot: () => (key === 'inbox'
-          ? { 'next-turn': [], 'next-step': landed ? [queueRow('s1', '在途消息')] : [] }
-          : undefined),
-      }),
-    },
+    projections: new HostProjectionStore(key => key === 'inbox'
+      ? { 'next-turn': [], 'next-step': landed ? [queueRow('s1', '在途消息')] : [] }
+      : undefined),
     updateQueue: async (itemId, action) => { calls.push({ itemId, action }); return { ok: true, value: {} } },
   }
   const mod = loadPlugin(doc, win, fetchImpl)
@@ -385,13 +394,9 @@ test('待发送气泡：接管时预取锚点，投影行文本被宿主改过�
   let edited = false
   const session = {
     getSnapshot: () => ({ pendingSubmissions: [] }),
-    projections: {
-      faceOf: key => ({
-        getSnapshot: () => (key === 'inbox'
-          ? { 'next-turn': [], 'next-step': [queueRow('s1', edited ? '宿主改过的话' : '原来的话')] }
-          : undefined),
-      }),
-    },
+    projections: new HostProjectionStore(key => key === 'inbox'
+      ? { 'next-turn': [], 'next-step': [queueRow('s1', edited ? '宿主改过的话' : '原来的话')] }
+      : undefined),
     updateQueue: async () => ({ ok: true, value: {} }),
   }
   const mod = loadPlugin(doc, win, fetchImpl)
@@ -417,18 +422,14 @@ test('待发送气泡：锚点失效（行已被 claim 离队）→ 说出真相
   let claimed = false
   const session = {
     getSnapshot: () => ({ pendingSubmissions: [] }),
-    projections: {
-      faceOf: key => ({
-        getSnapshot: () => (key === 'inbox'
-          ? {
-              'next-turn': [],
-              'next-step': claimed
-                ? [{ id: 'p1', content: [{ type: 'text', text: '预置跟进指令' }], source: { kind: 'preset' } }]
-                : [queueRow('s1', '已经发出去的消息')],
-            }
-          : undefined),
-      }),
-    },
+    projections: new HostProjectionStore(key => key === 'inbox'
+      ? {
+          'next-turn': [],
+          'next-step': claimed
+            ? [{ id: 'p1', content: [{ type: 'text', text: '预置跟进指令' }], source: { kind: 'preset' } }]
+            : [queueRow('s1', '已经发出去的消息')],
+        }
+      : undefined),
     updateQueue: async () => ({ ok: true, value: {} }),
   }
   const mod = loadPlugin(doc, win, fetchImpl)
@@ -590,17 +591,22 @@ test('宿主的用量/费用页脚不是模型消息，不接管（真机复现�
   assert.ok(msg.hasAttribute('data-rf3-taken'), '真消息块照常接管')
 })
 
-test('分类器：工具调用块不接管，短回复与含代码正文接管', async () => {
+test('分类器：讨论工具的自然语言必须接管（真机 bug 五修：3641 字技术分析被「工具调用」四个字误杀）', async () => {
   const doc = createDocument()
   const { window: win, flush } = createWindow()
   const { fetchImpl } = makeFetch()
   const conv = mk('div')
   conv.setAttribute('data-slot', 'main.conversation')
 
+  // 真实宿主（asar）的 AssistantMarkdown 对 tool-call 块是 break——工具调用
+  // 根本不在助手正文里渲染，词汇兜底纯误伤。这几段就是被误杀的真实形状：
+  // 技术分析里「调用工具 / 读取文件 / 工具调用」是讨论对象，不是工具块。
   const natural = mk('div', 'Kwoi6G_body')
   natural.append(mk('p', '', '这是一段纯粹的自然语言回复，用来说明某个问题的成因与解决办法，长度足够。'))
-  const tool = mk('div', 'Kwoi6G_body')
-  tool.append(mk('p', '', '调用工具 读取文件 C:\\Users\\test\\a.txt 完成后返回结果，长度也足够长。'))
+  const toolTalk = mk('div', 'Kwoi6G_body')
+  toolTalk.append(mk('p', '', '这个预设的工具调用走 tool-catalog 分页：调用工具时先查目录，读取文件再决定 native 还是 ptc 表面，完成后返回结果，长度也足够长。'))
+  const analysis = mk('div', 'Kwoi6G_body')
+  analysis.append(mk('p', '', '梁神模式把 guard / fact-ledger / working-context / paging / tool-catalog 五个自研插件挂在 minimal-prompt 上，工具调用与工具结果都由独立节点渲染，写入文件和读取文件只是其中最基础的两个工具，需要确认授权策略是否过严。'))
   const code = mk('div', 'Kwoi6G_body')
   code.append(mk('pre', '', 'npm install'), mk('p', '', '上面是执行的命令内容，长度足够触发识别阈值。'))
   const english = mk('div', 'Kwoi6G_body')
@@ -608,17 +614,34 @@ test('分类器：工具调用块不接管，短回复与含代码正文接管',
   const short = mk('div', 'Kwoi6G_body')
   short.append(mk('p', '', '嗯，还醒着。要测什么，直接说。'))
 
-  conv.append(natural, tool, code, english, short)
+  conv.append(natural, toolTalk, analysis, code, english, short)
   doc.body.append(conv)
   const mod = loadPlugin(doc, win, fetchImpl)
   mod.apply({ effect: () => {} })
   await tick(); flush()
 
   assert.ok(natural.hasAttribute('data-rf3-taken'), '纯自然语言块必须接管')
-  assert.equal(tool.hasAttribute('data-rf3-taken'), false, '工具调用块不得接管')
+  assert.ok(toolTalk.hasAttribute('data-rf3-taken'), '讨论工具调用的自然语言必须接管')
+  assert.ok(analysis.hasAttribute('data-rf3-taken'), '讨论了写入/读取文件的长分析必须接管')
   assert.ok(code.hasAttribute('data-rf3-taken'), '含代码块的正文必须接管')
   assert.ok(english.hasAttribute('data-rf3-taken'), 'diff/patch 子串不得误伤英文散文')
   assert.ok(short.hasAttribute('data-rf3-taken'), '短回复必须接管')
+})
+
+test('分类器：宿主用量/费用页脚仍不接管（词汇表收缩后仅剩的标记）', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+  const footer = mk('div', 'Kwoi6G_body')
+  footer.append(mk('p', '', '本轮费用 ≈ ¥0 + 未定价用量按已记录用量和配置价格估算；单价单位为每百万 tokens。'))
+  conv.append(footer)
+  doc.body.append(conv)
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  assert.equal(footer.hasAttribute('data-rf3-taken'), false, '费用页脚不能接管')
 })
 
 test('宿主重渲染抹掉操作条后自愈重接管', async () => {

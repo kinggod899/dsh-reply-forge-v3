@@ -151,15 +151,23 @@ export function hasPendingEcho(session, bubbleText) {
  * next-turn 排队消息不渲染气泡，用户点不到；把它收进来只会让同文本的等待项
  * 参与回匹、平白制造撞车。
  *
+ * ⚠️ **`faceOf` 必须绑定调用**（`projections.faceOf(key)`），绝不允许
+ * `const faceOf = projections.faceOf; faceOf(key)` 这种摘函数再调用的写法：
+ * 宿主 ProjectionValueStore 是 class，`faceOf(key) { return this.channel(key).face }`
+ * 内部用 `this`；模块是严格模式，裸调用的 `this` 是 undefined，必抛
+ * TypeError——而 try/catch 会把它吞成 null，症状是「诊断能读到行、
+ * 读取函数返回 null」的灵异矛盾（2026-10-21 真机 bug 四修的根因，两个版本
+ * 的误判全从这里来）。
+ *
  * @param {unknown} session ISession
  * @returns {unknown[] | null} null = 读不到投影（不是空队列）
  */
 export function readInboxProjection(session) {
   try {
     const projections = session === null || session === undefined ? undefined : session.projections
-    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
-    if (typeof faceOf !== 'function') return null
-    const face = faceOf(INBOX_KEY)
+    if (projections === null || projections === undefined) return null
+    if (typeof projections.faceOf !== 'function') return null
+    const face = projections.faceOf(INBOX_KEY)
     if (face === null || face === undefined) return null
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())
@@ -187,11 +195,12 @@ export function readInbox(session) {
 /**
  * 读 next-step 的**全部**行（不按 source.kind 过滤）。
  *
- * 存在的理由（2026-10-21 真机 bug 三修）：界面渲染 pending 气泡的条件是
- * `source.kind === 'user'`（ui-chat 逐字如此），但点击时刻读到的投影可能已经
- * 变了——回合结束 claim 会清空 next-step，随后插件/预注入的行又补进来。此时
- * 「按 kind 过滤」会把唯一可用的文本锚点一起滤掉。这一份不过滤的行给两个
- * 下游用：按 itemId 复核锚点、按文本做兜底回匹。
+ * 给三个下游用：按 itemId 复核锚点（resolvePendingItemById）、失败文案指路
+ * （hasTextMatchRow 区分「文本对不上」还是「kind 被滤掉」）、诊断速写
+ * （describeInboxRows 列出点击时刻投影里每一行）。
+ *
+ * ⚠️ 同 readInboxProjection：`faceOf` 必须绑定调用，见那里的说明
+ * （2026-10-21 真机 bug 四修根因）。
  *
  * @param {unknown} session ISession
  * @returns {unknown[] | null} null = 读不到投影（不是空队列）
@@ -199,9 +208,9 @@ export function readInbox(session) {
 export function readInboxRows(session) {
   try {
     const projections = session === null || session === undefined ? undefined : session.projections
-    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
-    if (typeof faceOf !== 'function') return null
-    const face = faceOf(INBOX_KEY)
+    if (projections === null || projections === undefined) return null
+    if (typeof projections.faceOf !== 'function') return null
+    const face = projections.faceOf(INBOX_KEY)
     if (face === null || face === undefined) return null
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())

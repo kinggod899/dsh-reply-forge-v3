@@ -130,6 +130,38 @@ test('原始行：投影读不到 → null（与 readInbox 同判据）', () => 
   assert.equal(readInboxRows(session), null)
 })
 
+// ── faceOf 绑定调用回归（2026-10-21 真机 bug 四修根因）────────────────────
+
+test('回归：faceOf 是按宿主形状的 class 方法（内部用 this），裸调用必抛', () => {
+  // 之前所有桩都用箭头函数写 faceOf（不碰 this），unbound 调用在桩里能跑、
+  // 在真机上必抛 TypeError —— 两个版本的「投影读到 0 行」全是它造成的，
+  // 而诊断卡（绑定调用）一直能读到，才出现 inboxNextStep:1 / projectionRows:0
+  // 的灵异矛盾。桩从此必须长成宿主 class 的形状。
+  class HostProjectionStore {
+    constructor(value) { this.value = value }
+    channel(key) {
+      if (key !== 'inbox') throw new Error('unknown projection key: ' + key)
+      return { face: { getSnapshot: () => this.value } }
+    }
+    faceOf(key) { return this.channel(key).face }  // ← 用 this，裸调用即抛
+  }
+  const value = { 'next-turn': [], 'next-step': [userRow('s1', '甲')] }
+  const session = { projections: new HostProjectionStore(value) }
+  // 修复后的绑定调用必须读得到。
+  assert.equal(readInbox(session).length, 1)
+  assert.equal(readInboxRows(session).length, 1)
+  // 反证：桩确实是 this 相关的（箭头函数桩可测不出这条回归）。
+  const stolen = session.projections.faceOf
+  assert.throws(() => stolen('inbox'))
+  // 绑定调用对 seqOf 同样成立（诊断一直在用绑定形式，本来就是对的）。
+  const withSeq = {
+    projections: Object.assign(new HostProjectionStore(value), {
+      seqOf(key) { return key === 'inbox' ? 228 : undefined },
+    }),
+  }
+  assert.equal(queueDiag(withSeq).inboxNextStep, 1)
+})
+
 // ── 本地发送回显（消息在途，2026-10-21 真机 bug 的在途检测）───────────────
 
 /** 造一条 pendingSubmissions 回显（宿主 beginSubmission 的形状）。 */
