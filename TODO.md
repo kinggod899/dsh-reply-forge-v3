@@ -7,11 +7,15 @@
 
 ## 当前状态（2026-10-21 复核）
 
-- 版本 `3.1.0`（**v3.2.0 待发**：PR #1/#2/#4/#5/#6 已合并进 main，PR #7 待合并，
-  合并后本机重装、用户真机复测）；
-  测试 **300 项执行 / 13 套有测**（10-21 实测：逐文件跑 13/13 全绿（`node --test` 按文件计），
-  其中 2 套（persistence/projection）需本机宿主包，缺则 SKIP 不计失败；client 套件 81 项、
-  queue 64 项，`build-client.mjs --check` 字节一致）。
+- 版本 `3.1.0`（**v3.2.0 发布中**：PR #1/#2/#4/#5/#6/#7 已合并进 main，用户真机复验
+  通过（10-21「验收成功」）；release/v3.2.0 版本 bump 分支已提 PR，合并后打 tag 出版）；
+  测试 **321 项 / 14 套**（10-21 实测：逐文件跑 14/14 全绿（`node --test` 按文件计），
+  其中 3 套（persistence/projection 及 ignorable 的宿主项共 21 项）需本机宿主包，
+  缺则 SKIP 不计失败（此态执行 300 项）；client 套件 81 项、queue 64 项，
+  `build-client.mjs --check` 字节一致）。**persistence 闭环首次在真实桌面端宿主
+  （app.asar 提取 + asar.unpacked 原生模块叠加）上验证通过**——此前对齐的是旧副本
+  （`E:/game/DSH`），其 jsonl 包是 default 导出、真宿主是命名导出，测试从没在真宿主上
+  跑通过（形状差 + 原生模块 koffi 缺失两连坑，已修）。
 - **仓库管理纪律（2026-10-20 用户拍板改）**：废除「main 单一干净 commit」，
   改为常规多 commit + PR 流程。每个特性/修复各一个分支、一个 PR，合并用
   **merge commit**（保留完整 commit message，不 squash、不重写公开历史）。
@@ -66,16 +70,16 @@
 |---|---|---|---|
 | BUG-1 | 写入伪造保存后焦点未回到宿主输入框 / 打字无效 | ✅ 已修复，用户真机复验通过（10-18） | 疑凶=native confirm（已改页面内两步确认）+ 焦点三机制 + 点击保险 + bar 压层 |
 | BUG-2 | 写入伪造被 STALE_TARGET 拒绝（重启后必现） | ✅ 已修复，用户真机复验通过（10-18） | 根因=投影双口径；修复=读路过投影 + PATCHED_TARGET 拒绝 + 自动重试一次 |
-| BUG-3 | 插件整页失效、按钮全无，重启 DSH 才好 | ✅ 已修复（10-20，PR #2），待用户真机复验 | 根因=bootstrap interval 找到锚点即永久自停，锚点被宿主 reconcile 换掉后 observer 挂死；修复=常驻心跳 + focus/visibilitychange 唤醒 |
-| BUG-4 | 带代码块的回复没有「伪造」按钮，但编辑器里能调出 | ✅ 已修复（10-20，PR #2），待用户真机复验 | 根因=宿主代码块 banner 带复制 button，被 classify 的 ACTION_TAGS 当结构化控件整块拒绝；修复=豁免代码块外壳 + BLOCK_TAGS 计代码块为块级内容（残留见 BUG-5） |
-| BUG-5 | 长文本回复（正文提到「工具调用」等词）没有「伪造」按钮 | ✅ 已修复（10-21，PR #7），待用户真机复验 | 根因=classify 的 ACTION_TEXT 含 20+ 条工具/文件/批准词汇，把 3641 字技术分析整条拒掉（宿主不在正文渲染工具调用块——asar ui-chat `case "tool-call": break;`；真 <button> 由 ACTION_TAGS 结构检查拦）；修复=ACTION_TEXT 只留 3 条费用页脚标记 |
+| BUG-3 | 插件整页失效、按钮全无，重启 DSH 才好 | ✅ 已修复（10-20，PR #2），用户真机复验通过（10-21） | 根因=bootstrap interval 找到锚点即永久自停，锚点被宿主 reconcile 换掉后 observer 挂死；修复=常驻心跳 + focus/visibilitychange 唤醒 |
+| BUG-4 | 带代码块的回复没有「伪造」按钮，但编辑器里能调出 | ✅ 已修复（10-20，PR #2），用户真机复验通过（10-21） | 根因=宿主代码块 banner 带复制 button，被 classify 的 ACTION_TAGS 当结构化控件整块拒绝；修复=豁免代码块外壳 + BLOCK_TAGS 计代码块为块级内容（残留见 BUG-5） |
+| BUG-5 | 长文本回复（正文提到「工具调用」等词）没有「伪造」按钮 | ✅ 已修复（10-21，PR #7），用户真机复验通过（10-21） | 根因=classify 的 ACTION_TEXT 含 20+ 条工具/文件/批准词汇，把 3641 字技术分析整条拒掉（宿主不在正文渲染工具调用块——asar ui-chat `case "tool-call": break;`；真 <button> 由 ACTION_TAGS 结构检查拦）；修复=ACTION_TEXT 只留 3 条费用页脚标记 |
 | 1 | 焦点修复真机复验：重启 DSH → 写入伪造 → 保存后直接打字 | ✅ 已验证通过（10-18） | 提示行显示「焦点已交还输入框」，可直接打字 |
 | 2 | 修复受损会话（`ignorable` 缺失的旧记录）：退出 DSH → `修复会话.bat` 诊断 → `apply` | ⬜ 待用户 | 原文件未动，工具已诊断命中 |
 | 3 | 真机验收矩阵：新/老会话 × 在线/落盘 | ⬜ 待用户 | 确认模型下一轮采信 |
 | 4 | 关插件重启回归：`关闭插件.bat` → 重启 → 会话可开、伪造退原文 | ⬜ 待用户 | 再 `启用插件.bat` 验恢复 |
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审 |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词、tarball 钉 v3.1.0；README 中英双版已加收录注记 |
-| 7 | **v3.2.0 发布**（inbox 队列编辑 + 四个 bug 修复） | 🔵 PR #7 待合并：faceOf 未绑定调用真凶修复 + 分类器五修；合并后本机重装，用户真机复测后发版 | 真机 bug 三修（PR #6）归因**错误**——「投影在气泡渲染后又变了（回合收走/React 慢半拍）」被新证据推翻：新诊断 `nextStepRows:"unreadable"`（readInboxRows 返回 null）与 `inboxNextStep:1`（queueDiag 绑定调用成功）出现在同一函数，唯一差异是绑定/未绑定 ⟹ 真凶 = `const faceOf = projections.faceOf; faceOf(INBOX_KEY)` 摘函数调用（宿主 ProjectionValueStore 是 class，faceOf 内部用 this；ES module 严格模式下 this=undefined → TypeError 被 try/catch 吞成 null）。测试桩全是箭头函数不碰 this，所以一直绿、真机必崩。修复=绑定调用 + 宿主形状 class 桩回归测试（`class HostProjectionStore`，断言绑定读得到 + 裸调必抛）。锚点复核/三路诚实失败/在途等待保留为有效加固（叙事不改错方向，改的是病根诊断）。分类器五修：ACTION_TEXT 从 20+ 条工具/文件/批准词汇收缩到仅 3 条费用页脚标记（asar 证据：ui-chat `case "tool-call": break;`——正文容器只渲染 text/reasoning/image/unknown，工具调用/批准是独立 node 带真按钮，ACTION_TAGS 结构检查已拦）——真机 3641 字技术分析（ session-8adcb914 消息#15）因含「工具调用」四字被拒，实跑从❌变✅。测试 queue 64 / client 81（执行 300 项）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
+| 7 | **v3.2.0 发布**（inbox 队列编辑 + 四个 bug 修复） | 🔵 用户真机复验通过（10-21「验收成功」）；release/v3.2.0 版本 bump PR 走完后打 tag + GitHub release + fresh clone 终验 | 真机 bug 三修（PR #6）归因**错误**——「投影在气泡渲染后又变了（回合收走/React 慢半拍）」被新证据推翻：新诊断 `nextStepRows:"unreadable"`（readInboxRows 返回 null）与 `inboxNextStep:1`（queueDiag 绑定调用成功）出现在同一函数，唯一差异是绑定/未绑定 ⟹ 真凶 = `const faceOf = projections.faceOf; faceOf(INBOX_KEY)` 摘函数调用（宿主 ProjectionValueStore 是 class，faceOf 内部用 this；ES module 严格模式下 this=undefined → TypeError 被 try/catch 吞成 null）。测试桩全是箭头函数不碰 this，所以一直绿、真机必崩。修复=绑定调用 + 宿主形状 class 桩回归测试（`class HostProjectionStore`，断言绑定读得到 + 裸调必抛）。锚点复核/三路诚实失败/在途等待保留为有效加固（叙事不改错方向，改的是病根诊断）。分类器五修：ACTION_TEXT 从 20+ 条工具/文件/批准词汇收缩到仅 3 条费用页脚标记（asar 证据：ui-chat `case "tool-call": break;`——正文容器只渲染 text/reasoning/image/unknown，工具调用/批准是独立 node 带真按钮，ACTION_TAGS 结构检查已拦）——真机 3641 字技术分析（ session-8adcb914 消息#15）因含「工具调用」四字被拒，实跑从❌变✅。测试 queue 64 / client 81（带宿主 321 项 / 14 套）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
 
 ## 不可破的规则（改代码前必读）
 
