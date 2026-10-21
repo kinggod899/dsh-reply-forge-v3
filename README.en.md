@@ -112,16 +112,31 @@ shoulders, we pushed "uninstalls cleanly" a bit further.
 
 ## Install
 
-Prerequisites: the DSH desktop app, and **Node.js** (the four `.bat` tools edit static
-config with it — they probe PATH, `C:\Program Files\nodejs`,
-`%LOCALAPPDATA%\Programs\nodejs`, and **DSH's bundled node**
-(`%USERPROFILE%\.dsh\dsh-runtimes\...\node\bin\node.exe` — it ships with DSH)). No Node
+Prerequisite: the DSH desktop app. Pick one of the two routes; either way you must
+**fully quit and restart DSH** afterwards (static config is only read at startup).
+
+### Route 1: npm (easiest, no extra Node.js needed)
+
+Type the package name `dsh-reply-forge-v3` into DSH's plugin manager and install; or quit
+DSH and run:
+
+```bash
+dsh plugin --profile desktop add dsh-reply-forge-v3
+```
+
+The plugin manager can also switch registries (npm official / mainland China mirror /
+custom URL), so private-registry setups work too.
+
+### Route 2: unzip (needs Node.js)
+
+Double-click `安装插件.bat`.
+
+The four `.bat` tools edit static config with Node.js — they probe PATH,
+`C:\Program Files\nodejs`, `%LOCALAPPDATA%\Programs\nodejs`, and **DSH's bundled node**
+(`%USERPROFILE%\.dsh\dsh-runtimes\...\node\bin\node.exe` — it ships with DSH). No Node
 either? The bats print the full manual four steps (package.json, cordis.patch.yml,
 junction) and you follow them by hand. The plugin itself runs inside DSH — no extra
 runtime.
-
-Double-click `安装插件.bat`, then **fully quit and restart DSH** (static config needs the
-restart to load).
 
 The script does exactly three things: create the junction, write `bundles` and
 `dependencies` into `package.json`, hand-register the lockfile entry. It never runs
@@ -267,6 +282,14 @@ otherwise blocks the host's lock-file cleanup).
 
 ## Version history
 
+- **3.3.0** — ships on npm, installs in one step:
+  - *New install route*: type `dsh-reply-forge-v3` in DSH's plugin manager, or quit DSH
+    and run `dsh plugin --profile desktop add dsh-reply-forge-v3`. The unzip route still
+    works; both contain the same build;
+  - *Package rename*: `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3` (npm needs a real
+    name, not the `@local` placeholder scope). Existing local installs migrate
+    automatically on the next `安装插件.bat` run — old link, dependency entry and lockfile
+    record are all removed, so you never end up with two action bars;
 - **3.2.0** — inbox queue editing ships, plus three "missing button" fixes:
   - *New feature*: messages sent while the AI is mid-reply queue up as bubbles in the
     conversation; hover one and hit "Edit queued" to rewrite it — no cancel, no pausing

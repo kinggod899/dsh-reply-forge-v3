@@ -93,7 +93,7 @@ async function makeApp(root, { withShim }) {
     // （已死的）后端；真实世界里这对应「插件全新加载」（生产的热重载由
     // ensureIgnorableShim 的自愈路径兜底，这里直接建模成干净加载）。
     await ctx.plugin({
-      name: '@local/dsh-reply-forge-v3',
+      name: 'dsh-reply-forge-v3',
       inject: ['sessions'],
       apply(c) {
         resetIgnorableShim()

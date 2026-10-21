@@ -16,10 +16,19 @@ import { join, resolve, dirname } from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-/** 本插件在 profile 里的身份（v3 专属，与 v1/v2 完全隔离）。 */
-export const PKG_ID = '@local/dsh-reply-forge-v3'
+/**
+ * 本插件在 profile 里的身份（v3 专属，与 v1/v2 完全隔离）。
+ *
+ * 2026-10-22 起改用 npm 可发布的裸名 `dsh-reply-forge-v3`（原为 `@local/…`）。
+ * 裸名的意义：宿主「插件管理器」与 `dsh plugin add` 都按 npm 包名解析，
+ * `@local` 是本地 link 的占位 scope，npm 上不可用。本机旧安装由 install.mjs
+ * 按 LEGACY_PKG_IDS 自动迁移，不需要手工清理。
+ */
+export const PKG_ID = 'dsh-reply-forge-v3'
 export const PATCH_ID = 'dsh-reply-forge-v3'
 export const LINK_NAME = 'dsh-reply-forge-v3'
+/** 旧身份（曾以 @local scope 安装）——迁移时按此清理 junction/依赖/bundles/lockfile。 */
+export const LEGACY_PKG_IDS = ['@local/dsh-reply-forge-v3']
 
 /**
  * 更早的两代 —— 只在「安装/启用 v3 时顺带把它们从 bundles 摘掉」用到。
@@ -53,7 +62,9 @@ export function paths() {
     PKG_JSON: join(PROFILE, 'package.json'),
     PATCH_YML: join(PROFILE, 'cordis.patch.yml'),
     LOCK: join(PROFILE, 'pnpm-lock.yaml'),
-    LINK: join(LOCAL_DIR, LINK_NAME),
+    LINK: join(NODE_MODULES, LINK_NAME),
+    /** 旧版 junction 位置（@local scope 下），迁移时清理。 */
+    LEGACY_LINKS: LEGACY_PKG_IDS.map(id => join(NODE_MODULES, ...id.split('/'))),
     /** package.json / lockfile 里用的 link 目标（正斜杠，与 v1 写法一致）。 */
     LINK_TARGET: REPO_ROOT.split('\\').join('/'),
   }
@@ -118,7 +129,7 @@ export function warnIfRunning(log) {
   return false
 }
 
-/** 建立 @local/<name> → target 的目录 junction（Windows 下无需管理员权限）。 */
+/** 建立 <node_modules>/<name> → target 的目录 junction（Windows 下无需管理员权限）。 */
 export function ensureLink(linkPath, target) {
   if (existsSync(join(linkPath, 'package.json'))) return { ok: true, created: false }
   if (existsSync(target) === false) return { ok: false, created: false, reason: '目标目录不存在：' + target }
@@ -205,11 +216,37 @@ export function ensureLockEntry(lockPath, name, specifier) {
   return { changed: true, text: lines.join('\n') }
 }
 
+/**
+ * 从 lockfile 里删掉一条 link 依赖（迁移旧包名用）。
+ *
+ * key 的三种写法都要认：`'@scope/name':` / `"@scope/name":` / `name:`（裸名
+ * pnpm 通常不加引号）。命中后连同其 8 空格续行（specifier / version）一起删。
+ */
+export function removeLockEntry(lockPath, name) {
+  if (existsSync(lockPath) === false) return { changed: false, reason: 'lockfile 不存在' }
+  const raw = readFileSync(lockPath, 'utf8')
+  const lines = raw.split('\n')
+  const forms = new Set([
+    "      '" + name + "':",
+    '      "' + name + '":',
+    '      ' + name + ':',
+  ])
+  const kept = []
+  let removed = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (forms.has(lines[i]) === false) { kept.push(lines[i]); continue }
+    removed += 1
+    while (i + 1 < lines.length && /^ {8}\S/.test(lines[i + 1])) i += 1
+  }
+  if (removed === 0) return { changed: false, reason: '未登记' }
+  return { changed: true, text: kept.join('\n'), removed }
+}
+
 // ── 安装后自检 ──────────────────────────────────────────────────────────────
 
 export function verify(p, log) {
   const checks = []
-  checks.push(['@local junction 就位', existsSync(join(p.LINK, 'package.json'))])
+  checks.push([PKG_ID + ' junction 就位', existsSync(join(p.LINK, 'package.json'))])
   let lockOk = false
   try { lockOk = readFileSync(p.LOCK, 'utf8').includes("'" + PKG_ID + "':") } catch { /* 忽略 */ }
   checks.push(['lockfile 已登记', lockOk])

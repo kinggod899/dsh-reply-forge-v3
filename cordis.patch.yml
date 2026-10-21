@@ -9,4 +9,4 @@
 # 共享同一份组合树时不会相互覆盖。
 - insert:
     - id: dsh-reply-forge-v3
-      name: '@local/dsh-reply-forge-v3'
+      name: 'dsh-reply-forge-v3'

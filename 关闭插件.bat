@@ -28,7 +28,7 @@ if not defined NODE if exist "%USERPROFILE%\.dsh\dsh-runtimes\dsh-primary-runtim
 if not defined NODE (
   echo [错误] 未找到 node.exe，无法自动执行。请手动完成以下两步：
   echo   1. 编辑 %PROFILE_DIR%\package.json
-  echo      从 dsh.profile.bundles 里删除 "@local/dsh-reply-forge-v3"
+  echo      从 dsh.profile.bundles 里删除 "dsh-reply-forge-v3"
   echo   2. 编辑 %PROFILE_DIR%\cordis.patch.yml
   echo      删除 id: dsh-reply-forge-v3 的整条条目（若有）
   echo.

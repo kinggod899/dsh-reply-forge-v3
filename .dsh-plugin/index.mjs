@@ -28,7 +28,7 @@ import { registerRoutes } from './server/routes.mjs'
 import { patchProjection } from './server/patch.mjs'
 import { installIgnorableShim } from './server/ignorable.mjs'
 
-export const name = '@local/dsh-reply-forge-v3'
+export const name = 'dsh-reply-forge-v3'
 
 // webServer：路由。sessions：活会话（在线读写）。两者都缺席时插件仍能加载，
 // 只是退化成 v2 的纯落盘能力。
