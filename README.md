@@ -95,14 +95,31 @@ v3 因此走了另一条路——自有事件 + 同类型 projection + `ignorabl
 
 ## 安装
 
-前提：已装 DSH 桌面端；**另需 Node.js**（安装/启用/关闭/修复四个 bat 靠它改静态
-配置——bat 会自动探测 PATH、`C:\Program Files\nodejs`、`%LOCALAPPDATA%\Programs\nodejs`
-与 **DSH 自带的 node**（`%USERPROFILE%\.dsh\dsh-runtimes\...\node\bin\node.exe`，
-装了 DSH 就有）共四处，一般装过 Node 或 DSH 就能直接用）。没有 Node 也不挡路：bat 会
-印出完整的手动四步（改 package.json / cordis.patch.yml / 建 junction），照做即可。
-插件本身跑在 DSH 内部，不要求你额外装运行时。
+前提：已装 DSH 桌面端。两条路线选一条，装完都要**完全退出并重启 DSH**
+（静态配置只在启动时加载）。
 
-**双击 `安装插件.bat`**，然后**完全退出并重启 DSH**（静态配置要重启才加载）。
+### 路线一：npm（最省事，不需要额外装 Node.js）
+
+在 DSH 的「插件管理器」里输入包名 `dsh-reply-forge-v3` 点安装；或者关掉 DSH 后
+在终端执行：
+
+```bash
+dsh plugin --profile desktop add dsh-reply-forge-v3
+```
+
+插件管理器还支持切换安装源（npm 官方源 / 中国大陆镜像源 / 自定义地址），
+内网或私有源环境也能装。
+
+### 路线二：zip 解压（需要 Node.js）
+
+**双击 `安装插件.bat`**。
+
+安装/启用/关闭/修复四个 bat 靠 Node.js 改静态配置——bat 会自动探测 PATH、
+`C:\Program Files\nodejs`、`%LOCALAPPDATA%\Programs\nodejs` 与 **DSH 自带的 node**
+（`%USERPROFILE%\.dsh\dsh-runtimes\...\node\bin\node.exe`，装了 DSH 就有）共四处，
+一般装过 Node 或 DSH 就能直接用。没有 Node 也不挡路：bat 会印出完整的手动四步
+（改 package.json / cordis.patch.yml / 建 junction），照做即可。
+插件本身跑在 DSH 内部，不要求你额外装运行时。
 
 脚本只做三件事：建 junction、写 `package.json` 的 `bundles` 与 `dependencies`、
 手工登记 lockfile 条目。它**不执行 `pnpm install`** —— 在 DSH 运行时跑 pnpm
@@ -241,6 +258,12 @@ node_modules，配置锚点放合并根——typert-loader 的 `createRequire` �
 
 ## 版本记录
 
+- **3.3.0** —— 上了 npm，装起来更省事：
+  - *新安装方式*：插件管理器里输入 `dsh-reply-forge-v3` 直接装，或关掉 DSH 后
+    `dsh plugin --profile desktop add dsh-reply-forge-v3`；zip 解压路线照旧，两者内容一致；
+  - *包名变更*：`@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`（上 npm 必须去掉
+    `@local` 占位 scope）。已本地安装的重跑一次 `安装插件.bat` 即自动迁移，旧链接、
+    依赖条目、lockfile 记录一并清掉，不会出现两条操作条；
 - **3.2.0** —— inbox 队列编辑上线 + 三处「按钮不见了」修复：
   - *新功能*：AI 生成中途发的消息会排队（气泡形式挂在会话里），现在可以把鼠标移到
     气泡上点「改待发送」直接改——不用撤、不用暂停 AI、不用重新打字；
