@@ -35,8 +35,18 @@ const CHAT_NODE_SELECTOR = '[data-slot="conversation.chat.node"]'
  * 新宿主把 ``` 代码块渲染成 div 而不是 pre，纯代码块消息的直接子元素
  * 一个块级标签都不沾，会被形状判定整体漏掉（真机：只回一段代码的回复
  * 没有编辑入口）。形态判定只是「收候选」，真正放行仍靠 classify。
+ *
+ * 2026-10-21 扩充：section/article/figure/details/dl 一族是**原始 HTML 块级
+ * 标签**（markdown 里写了 <section>…</section> 就会渲染出来）。宿主 UI 自身
+ * 一个都不用（真机 bundle 核对：全是 div/span），所以它们在消息节点里出现
+ * 只可能是模型输出的原始 HTML——漏掉它们等于漏掉整条消息。
+ *
+ * 故意**不含** div / span / 自定义元素的通配：布局外壳正是 div 嵌套
+ * （见文件头「布局外壳」条），把 div 算块级会让最外层过滤器一路滑到聊天
+ * 节点根本身，把工具卡片也裹进来（classify 再整块拒掉，用户连按钮都摸不到）。
+ * 自定义元素（tagName 含 '-'，如 <long_text_quote>）由 isBlockLevel 单独放行。
  */
-const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content]'
+const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content], section, article, figure, figcaption, details, summary, dl, dt, dd, aside, main, header, footer, hr'
 
 /** 幂等标记：已接管的节点带此属性。 */
 export const TAKEN_ATTR = 'data-rf3-taken'
@@ -53,6 +63,26 @@ function textLen(el) {
 }
 
 /**
+ * 子元素是否算「块级内容」。
+ *
+ * 两类放行：
+ *   1. BLOCK_TAGS 里的 markdown 产物标签；
+ *   2. **自定义元素**（tagName 含连字符）——宿主 UI 不用 Web Components，
+ *      消息节点里出现 <long_text_quote> 这类标签只能是 markdown 原始 HTML
+ *      （真机 bug 2026-10-21：梁神预设的长文本回复整条被自定义元素包住，
+ *      直接子元素一个块级标签都不沾，消息整体漏掉）。
+ */
+function isBlockLevel(el) {
+  try {
+    if (typeof el.matches === 'function' && el.matches(BLOCK_TAGS)) return true
+  } catch {
+    return false
+  }
+  const tag = typeof el.tagName === 'string' ? el.tagName.toLowerCase() : ''
+  return tag.includes('-')
+}
+
+/**
  * 判断是否为「markdown 正文容器」：直接子元素里块级标签占一半以上。
  * 这一形状把三类容器区分开：
  *   - 助手正文容器：子元素就是 p/ul/ol/pre…（全中）；
@@ -65,11 +95,7 @@ function isMarkdownContainer(el) {
   if (kids.length === 0) return false
   let blocks = 0
   for (const k of kids) {
-    try {
-      if (k.matches(BLOCK_TAGS)) blocks += 1
-    } catch {
-      return false
-    }
+    if (isBlockLevel(k)) blocks += 1
   }
   return blocks >= 1 && blocks * 2 >= kids.length
 }

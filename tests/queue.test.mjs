@@ -12,9 +12,10 @@
 import assert from 'node:assert/strict'
 import { mk } from './dom-stub.mjs'
 import {
-  normalizeInbox, readInbox, readQueueMirror, readInboxProjection, queueDiag,
+  normalizeInbox, readInbox, readInboxProjection, queueDiag,
   contentText, bubbleTextOf, collapseWhitespace,
   resolvePendingItem, explainQueueError, updateQueueFailure, submitQueueEdit,
+  readPendingEchoes, hasPendingEcho,
 } from '../.dsh-plugin/client/queue.mjs'
 
 const tests = []
@@ -32,7 +33,7 @@ const fileRow = (id, text) => ({
   content: [{ type: 'text', text }, { type: 'file', file: { name: 'a.png' } }],
   source: { kind: 'user' },
 })
-const inboxOf = (...rows) => ({ nextTurn: [], nextStep: rows })
+const inboxOf = (...rows) => rows
 
 // ── normalizeInbox ────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ test('归一：键值不是数组时当空（网络编解码后的值不可全�
 
 // ── readInbox ─────────────────────────────────────────────────────────────
 
-test('读取：正常投影能拿到的两份队列', () => {
+test('读取：正常投影只返回 next-step 的 user 行（next-turn 不渲染气泡）', () => {
   const session = {
     projections: {
       faceOf: key => ({
@@ -72,8 +73,8 @@ test('读取：正常投影能拿到的两份队列', () => {
     },
   }
   const inbox = readInbox(session)
-  assert.equal(inbox.nextTurn.length, 1)
-  assert.equal(inbox.nextStep.length, 1)
+  assert.equal(inbox.length, 1)
+  assert.equal(inbox[0].id, 's1')
 })
 
 test('读取：快照 undefined（键还没有值）→ null', () => {
@@ -98,105 +99,123 @@ test('读取：face 没有 getSnapshot → null', () => {
   assert.equal(readInbox(session), null)
 })
 
-// ── 瞬态队列镜像（UI 真源，2026-10-20 真机 bug 的第一源）───────────────────
+// ── 本地发送回显（消息在途，2026-10-21 真机 bug 的在途检测）───────────────
 
-/** 造一条镜像行（宿主 SessionQueueMirror.replace 的形状）。 */
-const mirrorRow = (id, placement, blocks) => ({ id, placement, content: blocks, text: null })
+/** 造一条 pendingSubmissions 回显（宿主 beginSubmission 的形状）。 */
+const echoRow = (requestId, text, extra = {}) => ({
+  requestId,
+  placement: extra.placement ?? 'steering',
+  time: extra.time ?? 1000,
+  text,
+  attachments: extra.attachments ?? [],
+})
 
-test('镜像：steering 行进 next-step，queued 行进 next-turn，context 行跳过', () => {
+test('回显：只收 steering（queued/transcript 不渲染气泡）', () => {
   const session = {
     getSnapshot: () => ({
-      queue: [
-        mirrorRow('s1', 'steering', [{ type: 'text', text: '插入' }]),
-        mirrorRow('t1', 'queued', [{ type: 'text', text: '排队' }]),
-        mirrorRow('c1', 'context', [{ type: 'text', text: '注入' }]),
-        mirrorRow('bad', 'weird', [{ type: 'text', text: '未知placement' }]),
+      pendingSubmissions: [
+        echoRow('r1', '插入', { placement: 'steering' }),
+        echoRow('r2', '排队', { placement: 'queued' }),
+        echoRow('r3', '直发', { placement: 'transcript' }),
       ],
     }),
   }
-  const mirror = readQueueMirror(session)
-  assert.deepEqual(mirror.map(r => [r.slot, r.row.id]), [['next-step', 's1'], ['next-turn', 't1']])
-  assert.equal(mirror.find(r => r.row.id === 'c1'), undefined, 'context 注入行不是用户消息')
+  const echoes = readPendingEchoes(session)
+  assert.deepEqual(echoes.map(e => e.requestId), ['r1'])
+  assert.equal(echoes[0].text, '插入')
 })
 
-test('镜像：没有 getSnapshot / 快照 queue 不是数组 → null（读不到，不是空）', () => {
-  assert.equal(readQueueMirror({}), null)
-  assert.equal(readQueueMirror({ getSnapshot: () => ({}) }), null)
-  assert.equal(readQueueMirror({ getSnapshot: () => ({ queue: 'nope' }) }), null)
-  assert.equal(readQueueMirror(null), null)
-  assert.equal(readQueueMirror({ getSnapshot: () => { throw new Error('boom') } }), null)
+test('回显：没有 getSnapshot / 字段不是数组 → 空数组（不是错误）', () => {
+  assert.deepEqual(readPendingEchoes({}), [])
+  assert.deepEqual(readPendingEchoes({ getSnapshot: () => ({}) }), [])
+  assert.deepEqual(readPendingEchoes({ getSnapshot: () => ({ pendingSubmissions: 'nope' }) }), [])
+  assert.deepEqual(readPendingEchoes(null), [])
+  assert.deepEqual(readPendingEchoes({ getSnapshot: () => { throw new Error('boom') } }), [])
 })
 
-test('镜像：id 不是非空字符串的行丢弃（updateQueue 无从下手）', () => {
+test('回显：requestId 不是非空字符串 → 丢弃', () => {
   const session = {
     getSnapshot: () => ({
-      queue: [
-        mirrorRow('', 'steering', [{ type: 'text', text: '空id' }]),
-        mirrorRow(42, 'steering', [{ type: 'text', text: '数字id' }]),
-        mirrorRow('ok', 'steering', [{ type: 'text', text: '好的' }]),
+      pendingSubmissions: [
+        echoRow('', '空id'),
+        echoRow(42, '数字id'),
+        echoRow('ok', '好的'),
       ],
     }),
   }
-  assert.deepEqual(readQueueMirror(session).map(r => r.row.id), ['ok'])
+  assert.deepEqual(readPendingEchoes(session).map(e => e.requestId), ['ok'])
 })
 
-test('合并：投影整键缺失（真机 bug）但镜像有数据 → 照常能读', () => {
+test('在途判断：精确 / 折叠空白都算在途；两条相同文本也照样等（不学严格匹配）', () => {
   const session = {
-    getSnapshot: () => ({ queue: [mirrorRow('s1', 'steering', [{ type: 'text', text: '先思考一下' }])] }),
-    projections: { faceOf: () => ({ getSnapshot: () => undefined }) },
+    getSnapshot: () => ({
+      pendingSubmissions: [echoRow('r1', '帮我改这段'), echoRow('r2', '帮我\n改  这段')],
+    }),
+  }
+  assert.equal(hasPendingEcho(session, '帮我改这段'), true)
+  assert.equal(hasPendingEcho(session, '帮我 改 这段'), true, '折叠空白后命中 r2')
+  assert.equal(hasPendingEcho(session, '不存在'), false)
+  assert.equal(hasPendingEcho(session, ''), false)
+  assert.equal(hasPendingEcho({}, '任何文本'), false)
+})
+
+test('在途：投影空 + 回显在 = 消息在途（等它落库，不报错）', () => {
+  const session = {
+    getSnapshot: () => ({ pendingSubmissions: [echoRow('r1', '先思考一下')] }),
+    projections: { faceOf: () => ({ getSnapshot: () => ({ 'next-turn': [], 'next-step': [] }) }) },
   }
   const inbox = readInbox(session)
-  assert.equal(inbox.nextStep.length, 1)
-  assert.equal(inbox.nextStep[0].id, 's1')
+  assert.deepEqual(inbox, [], '投影可读且空 = 空队列，不是读不到')
+  assert.equal(hasPendingEcho(session, '先思考一下'), true)
 })
 
-test('合并：镜像空、投影有行 → 落到投影源', () => {
+test('在途：投影有行时走投影（回显只是兜底信号）', () => {
   const session = {
-    getSnapshot: () => ({ queue: [] }),
+    getSnapshot: () => ({ pendingSubmissions: [echoRow('r1', '先思考一下')] }),
     projections: {
-      faceOf: () => ({ getSnapshot: () => ({ 'next-turn': [], 'next-step': [userRow('s1', '插入')] }) }),
+      faceOf: () => ({ getSnapshot: () => ({ 'next-turn': [], 'next-step': [userRow('s1', '先思考一下')] }) }),
     },
   }
   const inbox = readInbox(session)
-  assert.equal(inbox.nextStep.length, 1)
-  assert.equal(inbox.nextStep[0].id, 's1')
+  const resolved = resolvePendingItem(inbox, '先思考一下')
+  assert.equal(resolved.ok, true)
+  assert.equal(resolved.itemId, 's1')
 })
 
-test('合并：两个源同一 id → 去重，镜像行优先', () => {
+test('回显：真实桌面端宿主快照没有 queue 字段（旧副本坑，别回退）', () => {
   const session = {
-    getSnapshot: () => ({ queue: [mirrorRow('s1', 'steering', [{ type: 'text', text: '镜像版' }])] }),
-    projections: {
-      faceOf: () => ({
-        getSnapshot: () => ({ 'next-turn': [], 'next-step': [userRow('s1', '投影版')] }),
-      }),
-    },
+    getSnapshot: () => ({ pendingSubmissions: [], running: true, openState: 'open' }),
+    projections: { faceOf: () => ({ getSnapshot: () => ({ 'next-turn': [], 'next-step': [] }) }) },
   }
-  const inbox = readInbox(session)
-  assert.equal(inbox.nextStep.length, 1)
-  assert.equal(inbox.nextStep[0].content[0].text, '镜像版')
-})
-
-test('合并：两个源都读不到 → null（与「可读但为空」区分开）', () => {
-  assert.deepEqual(readInbox({ getSnapshot: () => ({ queue: [] }), projections: null }), {
-    nextTurn: [], nextStep: [],
-  }, '镜像可读且空 + 投影缺失 = 空队列，不是读不到')
-  assert.equal(readInbox({}), null)
+  assert.deepEqual(readInbox(session), [])
+  assert.ok(readPendingEchoes(session).length === 0)
 })
 
 test('诊断：queueDiag 产出纯 JSON、不抛，含关键字段', () => {
   const session = {
-    getSnapshot: () => ({ queue: [mirrorRow('s1', 'steering', [{ type: 'text', text: '甲' }])] }),
-    projections: { rows: new Map([['inbox', {}]]), faceOf: () => ({ getSnapshot: () => undefined }) },
+    getSnapshot: () => ({
+      pendingSubmissions: [echoRow('r1', '甲')],
+    }),
+    projections: {
+      rows: new Map([['inbox', {}]]),
+      seqOf: () => 42,
+      faceOf: () => ({
+        getSnapshot: () => ({ 'next-turn': [], 'next-step': [userRow('s1', '甲')] }),
+      }),
+    },
   }
-  const diag = queueDiag(session)
+  const diag = queueDiag(session, { sessionId: 'sess-1', bubbleKind: 'echo' })
   assert.equal(typeof diag.hasSession, 'boolean')
   assert.equal(diag.hasSession, true)
   assert.equal(diag.hasGetSnapshot, true)
   assert.deepEqual(diag.projectionKeys, ['inbox'])
-  assert.equal(diag.inboxSnapshot, 'undefined')
-  assert.equal(diag.snapshotQueue, 'steering')
-  assert.equal(diag.mirrorRows, 1)
-  assert.equal(diag.projectionRows, 0)
+  assert.equal(diag.inboxNextStep, 1)
+  assert.equal(diag.inboxNextTurn, 0)
+  assert.equal(diag.inboxSeq, 42)
+  assert.equal(diag.echoCount, 1)
+  assert.equal(diag.projectionRows, 1)
+  assert.equal(diag.sessionId, 'sess-1')
+  assert.equal(diag.bubbleKind, 'echo')
   assert.doesNotThrow(() => JSON.stringify(diag))
   assert.deepEqual(queueDiag(null), { hasSession: false })
   assert.doesNotThrow(() => queueDiag({}))

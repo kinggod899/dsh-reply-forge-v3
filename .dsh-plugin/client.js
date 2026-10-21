@@ -162,7 +162,17 @@ const CHAT_NODE_SELECTOR = '[data-slot="conversation.chat.node"]'
 
 
 
-const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content]'
+
+
+
+
+
+
+
+
+
+
+const BLOCK_TAGS = 'p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, table, .md-code-block, [data-code-block-content], section, article, figure, figcaption, details, summary, dl, dt, dd, aside, main, header, footer, hr'
 
 
 const TAKEN_ATTR = 'data-rf3-taken'
@@ -182,17 +192,33 @@ function textLen(el) {
 
 
 
+
+
+
+function isBlockLevel(el) {
+  try {
+    if (typeof el.matches === 'function' && el.matches(BLOCK_TAGS)) return true
+  } catch {
+    return false
+  }
+  const tag = typeof el.tagName === 'string' ? el.tagName.toLowerCase() : ''
+  return tag.includes('-')
+}
+
+
+
+
+
+
+
+
 function isMarkdownContainer(el) {
   if (typeof el.matches !== 'function') return false
   const kids = [...el.children]
   if (kids.length === 0) return false
   let blocks = 0
   for (const k of kids) {
-    try {
-      if (k.matches(BLOCK_TAGS)) blocks += 1
-    } catch {
-      return false
-    }
+    if (isBlockLevel(k)) blocks += 1
   }
   return blocks >= 1 && blocks * 2 >= kids.length
 }
@@ -1137,6 +1163,8 @@ var __m_dsh_plugin_client_queue_mjs = (function(){
 
 
 
+
+
 const INBOX_KEY = 'inbox'
 
 
@@ -1181,32 +1209,46 @@ function normalizeInbox(snapshot) {
 
 
 
-
-
-
-function readQueueMirror(session) {
+function readPendingEchoes(session) {
   try {
-    if (session === null || typeof session !== 'object') return null
-    if (typeof session.getSnapshot !== 'function') return null
+    if (session === null || typeof session !== 'object') return []
+    if (typeof session.getSnapshot !== 'function') return []
     const snap = session.getSnapshot()
-    const queue = snap !== null && typeof snap === 'object' ? snap.queue : undefined
-    if (!Array.isArray(queue)) return null
-    const rows = []
-    for (const item of queue) {
+    const list = snap !== null && typeof snap === 'object' ? snap.pendingSubmissions : undefined
+    if (!Array.isArray(list)) return []
+    const out = []
+    for (const item of list) {
       if (item === null || typeof item !== 'object') continue
-      const id = typeof item.id === 'string' && item.id !== '' ? item.id : undefined
-      if (id === undefined) continue
-      const content = Array.isArray(item.content) ? item.content : []
-      
-      const row = { id, content, source: { kind: PENDING_SOURCE_KIND } }
-      if (item.placement === 'steering') rows.push({ slot: 'next-step', row })
-      else if (item.placement === 'queued') rows.push({ slot: 'next-turn', row })
-      
+      if (item.placement !== 'steering') continue
+      const requestId = typeof item.requestId === 'string' && item.requestId !== '' ? item.requestId : undefined
+      const text = typeof item.text === 'string' ? item.text : ''
+      if (requestId === undefined) continue
+      out.push({ requestId, text, time: typeof item.time === 'number' ? item.time : 0 })
     }
-    return rows
+    return out
   } catch {
-    return null
+    return []
   }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+function hasPendingEcho(session, bubbleText) {
+  const raw = String(bubbleText ?? '')
+  if (raw === '') return false
+  const collapsed = collapseWhitespace(raw)
+  return readPendingEchoes(session).some(e =>
+    e.text === raw || (collapsed !== '' && collapseWhitespace(e.text) === collapsed))
 }
 
 
@@ -1233,14 +1275,7 @@ function readInboxProjection(session) {
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())
     if (normalized === null) return null
-    const rows = []
-    for (const row of normalized.nextTurn) {
-      if (isPendingUserRow(row)) rows.push({ slot: 'next-turn', row })
-    }
-    for (const row of normalized.nextStep) {
-      if (isPendingUserRow(row)) rows.push({ slot: 'next-step', row })
-    }
-    return rows
+    return normalized.nextStep.filter(isPendingUserRow)
   } catch {
     
     return null
@@ -1257,19 +1292,7 @@ function readInboxProjection(session) {
 
 
 function readInbox(session) {
-  const mirror = readQueueMirror(session)
-  const projection = readInboxProjection(session)
-  if (mirror === null && projection === null) return null
-  const seen = new Set()
-  const nextTurn = []
-  const nextStep = []
-  for (const { slot, row } of [...(mirror ?? []), ...(projection ?? [])]) {
-    if (seen.has(row.id)) continue
-    seen.add(row.id)
-    if (slot === 'next-turn') nextTurn.push(row)
-    else nextStep.push(row)
-  }
-  return { nextTurn, nextStep }
+  return readInboxProjection(session)
 }
 
 
@@ -1282,9 +1305,15 @@ function readInbox(session) {
 
 
 
-function queueDiag(session) {
+
+
+
+
+function queueDiag(session, extra = {}) {
   const out = {}
   try {
+    if (extra.sessionId !== undefined) out.sessionId = String(extra.sessionId)
+    if (extra.bubbleKind !== undefined) out.bubbleKind = extra.bubbleKind
     out.hasSession = session !== null && typeof session === 'object'
     if (!out.hasSession) return out
     out.ctor = typeof session.constructor?.name === 'string' ? session.constructor.name : '?'
@@ -1301,7 +1330,21 @@ function queueDiag(session) {
         const face = projections.faceOf(INBOX_KEY)
         out.face = face === null || face === undefined ? 'absent' : typeof face
         const snap = typeof face?.getSnapshot === 'function' ? face.getSnapshot() : undefined
-        out.inboxSnapshot = snap === undefined ? 'undefined' : snap === null ? 'null' : typeof snap
+        if (snap === undefined || snap === null) {
+          out.inboxSnapshot = snap === undefined ? 'undefined' : 'null'
+        } else if (typeof snap === 'object') {
+          out.inboxSnapshot = Array.isArray(snap['next-step'])
+            ? 'keys:' + Object.keys(snap).join(',')
+            : 'object(no next-step array)'
+          out.inboxNextStep = Array.isArray(snap['next-step']) ? snap['next-step'].length : 'absent'
+          out.inboxNextTurn = Array.isArray(snap['next-turn']) ? snap['next-turn'].length : 'absent'
+        } else {
+          out.inboxSnapshot = typeof snap
+        }
+        if (typeof projections?.seqOf === 'function') {
+          const seq = projections.seqOf(INBOX_KEY)
+          out.inboxSeq = typeof seq === 'number' ? seq : String(seq)
+        }
       } else {
         out.face = 'absent'
       }
@@ -1309,14 +1352,10 @@ function queueDiag(session) {
       out.inboxSnapshot = `throw:${String(error && error.message ? error.message : error)}`
     }
     try {
-      if (typeof session.getSnapshot === 'function') {
-        const snap = session.getSnapshot()
-        out.snapshotQueue = Array.isArray(snap?.queue)
-          ? snap.queue.map(item => (item && typeof item.placement === 'string' ? item.placement : '?')).join(',')
-          : 'not-array'
-      }
-    } catch { out.snapshotQueue = 'throw' }
-    out.mirrorRows = (readQueueMirror(session) ?? []).length
+      const echoes = readPendingEchoes(session)
+      out.echoCount = echoes.length
+      out.echoTexts = echoes.map(e => `${String(e.time)}:${e.text.slice(0, 30)}`)
+    } catch { out.echoCount = 'throw' }
     out.projectionRows = (readInboxProjection(session) ?? []).length
   } catch { /* 诊断自身绝不影响主流程 */ }
   return out
@@ -1420,7 +1459,7 @@ function bubbleTextOf(row, skipSelector = '[data-clock]') {
  * 不差的待发送消息虽然少见，但改错一条的代价是用户的消息被悄悄换掉，而这里是
  * 纯文本回匹、没有任何强锚点可依，宁可提示「定位不准」也不能猜。
  *
- * @param {{ nextTurn: unknown[], nextStep: unknown[] } | null} inbox normalizeInbox 的产物
+ * @param {unknown[] | null} inbox readInbox 的产物（next-step 的 user 行）
  * @param {string} bubbleText 气泡可见文本
  * @returns {{ ok: true, itemId: string, text: string, textOnly: boolean }
  *          | { ok: false, error: string }}
@@ -1434,7 +1473,7 @@ function resolvePendingItem(inbox, bubbleText) {
   let exact = []
   // tier 1：折叠空白后匹配。
   let fuzzy = []
-  for (const row of inbox.nextStep) {
+  for (const row of inbox) {
     if (!isPendingUserRow(row)) continue
     const parts = contentText(rowContent(row))
     if (parts.text === raw && raw !== '') exact.push({ row, parts })
@@ -1558,12 +1597,13 @@ async function submitQueueEdit(session, itemId, text) {
   }
 }
 
- return { normalizeInbox: normalizeInbox, readQueueMirror: readQueueMirror, readInboxProjection: readInboxProjection, readInbox: readInbox, queueDiag: queueDiag, rowContent: rowContent, contentText: contentText, collapseWhitespace: collapseWhitespace, bubbleTextOf: bubbleTextOf, resolvePendingItem: resolvePendingItem, explainQueueError: explainQueueError, updateQueueFailure: updateQueueFailure, submitQueueEdit: submitQueueEdit, INBOX_KEY: INBOX_KEY, PENDING_SOURCE_KIND: PENDING_SOURCE_KIND } })();
+ return { normalizeInbox: normalizeInbox, readPendingEchoes: readPendingEchoes, hasPendingEcho: hasPendingEcho, readInboxProjection: readInboxProjection, readInbox: readInbox, queueDiag: queueDiag, rowContent: rowContent, contentText: contentText, collapseWhitespace: collapseWhitespace, bubbleTextOf: bubbleTextOf, resolvePendingItem: resolvePendingItem, explainQueueError: explainQueueError, updateQueueFailure: updateQueueFailure, submitQueueEdit: submitQueueEdit, INBOX_KEY: INBOX_KEY, PENDING_SOURCE_KIND: PENDING_SOURCE_KIND } })();
 var readInbox = __m_dsh_plugin_client_queue_mjs.readInbox;
 var resolvePendingItem = __m_dsh_plugin_client_queue_mjs.resolvePendingItem;
 var bubbleTextOf = __m_dsh_plugin_client_queue_mjs.bubbleTextOf;
 var submitQueueEdit = __m_dsh_plugin_client_queue_mjs.submitQueueEdit;
 var queueDiag = __m_dsh_plugin_client_queue_mjs.queueDiag;
+var hasPendingEcho = __m_dsh_plugin_client_queue_mjs.hasPendingEcho;
 
 
 
@@ -2045,7 +2085,12 @@ function unhideBlockBar(block) {
 
 function closeEditor(options = {}) {
   if (openEditor === null) return
-  const { wrap } = openEditor
+  const { wrap, poll } = openEditor
+  
+  
+  if (poll !== undefined && poll !== null) {
+    try { clearInterval(poll) } catch {  }
+  }
   const doc = openEditor.doc ?? wrap.ownerDocument ?? document
   const block = openEditor.block
   const active = doc.activeElement ?? null
@@ -2412,6 +2457,11 @@ function openQueueEditor(bubble, sessions, docOverride) {
   disarmTypingGuard()
   const doc = docOverride ?? bubble.ownerDocument ?? document
   const sessionId = currentSessionId(doc)
+  
+  let bubbleKind = 'unknown'
+  try {
+    bubbleKind = bubble.hasAttribute('data-submission-echo') ? 'echo' : 'host'
+  } catch {  }
 
   const wrap = doc.createElement('div')
   wrap.className = 'rf3-editor'
@@ -2422,6 +2472,7 @@ function openQueueEditor(bubble, sessions, docOverride) {
 
   
   const failOpen = (text, diag) => {
+    wrap.textContent = ''
     wrap.append(label, makeNote(doc, 'warn', text))
     if (diag !== undefined) {
       let line = ''
@@ -2442,18 +2493,87 @@ function openQueueEditor(bubble, sessions, docOverride) {
 
   const session = resolveSession(sessions, sessionId)
   if (session === null) {
-    failOpen('当前会话还没准备好，稍后再试', queueDiag(null))
+    failOpen('当前会话还没准备好，稍后再试', queueDiag(null, { sessionId, bubbleKind }))
     return
   }
+  const bubbleText = bubbleTextOf(bubble, PENDING_TEXT_SKIP)
   const inbox = readInbox(session)
-  const resolved = resolvePendingItem(inbox, bubbleTextOf(bubble, PENDING_TEXT_SKIP))
-  if (resolved.ok !== true) {
-    failOpen(resolved.error, queueDiag(session))
+  const resolved = resolvePendingItem(inbox, bubbleText)
+  if (resolved.ok === true) {
+    buildQueueEditor(session, resolved.itemId, resolved.text, bubble, doc, wrap, label)
     return
   }
+  
+  
+  
+  
+  if (hasPendingEcho(session, bubbleText)) {
+    waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind)
+    return
+  }
+  failOpen(resolved.error, queueDiag(session, { sessionId, bubbleKind }))
+}
 
+
+const INBOX_LANDING_POLL_MS = 200
+const INBOX_LANDING_TIMEOUT_MS = 6000
+
+
+
+
+
+
+
+function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind) {
+  const note = makeNote(doc, 'info', '消息正在进入队列，请稍候…')
+  wrap.append(label, note)
+  bubble.append(wrap)
+  openEditor = { wrap, doc, kind: 'queue-wait', anchor: bubble }
+  const deadline = Date.now() + INBOX_LANDING_TIMEOUT_MS
+  const timer = setInterval(() => {
+    if (openEditor === null || openEditor.wrap !== wrap || wrap.isConnected === false) {
+      clearInterval(timer)
+      return
+    }
+    const resolved = resolvePendingItem(readInbox(session), bubbleText)
+    if (resolved.ok === true) {
+      clearInterval(timer)
+      wrap.textContent = ''
+      buildQueueEditor(session, resolved.itemId, resolved.text, bubble, doc, wrap, label)
+      return
+    }
+    
+    
+    if (hasPendingEcho(session, bubbleText) !== true) {
+      clearInterval(timer)
+      openEditor = null
+      failOpen(
+        '这条消息没有进入待发送队列（可能发送失败或已被处理）。',
+        queueDiag(session, { sessionId, bubbleKind })
+      )
+      return
+    }
+    if (Date.now() >= deadline) {
+      clearInterval(timer)
+      openEditor = null
+      failOpen(
+        '这条消息一直没有进入待发送队列（可能已发出或被宿主拒绝）。若反复出现，请把下面的诊断信息反馈给插件作者。',
+        queueDiag(session, { sessionId, bubbleKind })
+      )
+    }
+  }, INBOX_LANDING_POLL_MS)
+  openEditor.poll = timer
+}
+
+
+
+
+
+
+
+function buildQueueEditor(session, itemId, text, bubble, doc, wrap, label) {
   const area = doc.createElement('textarea')
-  area.value = resolved.text
+  area.value = text
   area.spellcheck = false
   area.setAttribute('aria-label', '编辑待发送消息')
   
@@ -2494,9 +2614,9 @@ function openQueueEditor(bubble, sessions, docOverride) {
   let saving = false
   const submit = async () => {
     if (saving === true) return
-    const text = String(area.value ?? '')
+    const next = String(area.value ?? '')
     
-    if (text.trim() === '') {
+    if (next.trim() === '') {
       status.textContent = '内容不能为空'
       return
     }
@@ -2504,7 +2624,7 @@ function openQueueEditor(bubble, sessions, docOverride) {
     saveBtn.disabled = true
     cancelBtn.disabled = true
     status.textContent = '保存中…'
-    const failure = await submitQueueEdit(session, resolved.itemId, text)
+    const failure = await submitQueueEdit(session, itemId, next)
     if (failure === null) {
       
       closeEditor()

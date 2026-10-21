@@ -31,6 +31,7 @@ import {
 } from './record.mjs'
 import {
   readInbox, resolvePendingItem, bubbleTextOf, submitQueueEdit, queueDiag,
+  hasPendingEcho,
 } from './queue.mjs'
 
 export const name = 'dsh-reply-forge-v3'
@@ -487,7 +488,12 @@ function unhideBlockBar(block) {
  */
 function closeEditor(options = {}) {
   if (openEditor === null) return
-  const { wrap } = openEditor
+  const { wrap, poll } = openEditor
+  // 轮询中的等待编辑器（queue-wait）必须在这里停掉，否则 closeEditor 之后
+  // 定时器还在跑，会把已经关掉的 wrap 又填上内容。
+  if (poll !== undefined && poll !== null) {
+    try { clearInterval(poll) } catch { /* 忽略 */ }
+  }
   const doc = openEditor.doc ?? wrap.ownerDocument ?? document
   const block = openEditor.block
   const active = doc.activeElement ?? null
@@ -854,6 +860,11 @@ function openQueueEditor(bubble, sessions, docOverride) {
   disarmTypingGuard()
   const doc = docOverride ?? bubble.ownerDocument ?? document
   const sessionId = currentSessionId(doc)
+  // 点到的气泡是宿主气泡还是本地回显（消息在途时界面显示回显），诊断要能看出来。
+  let bubbleKind = 'unknown'
+  try {
+    bubbleKind = bubble.hasAttribute('data-submission-echo') ? 'echo' : 'host'
+  } catch { /* 合成节点没有 hasAttribute，忽略 */ }
 
   const wrap = doc.createElement('div')
   wrap.className = 'rf3-editor'
@@ -864,6 +875,7 @@ function openQueueEditor(bubble, sessions, docOverride) {
 
   /** 定位或会话没就绪时：只留说明，不给输入框。附一行诊断（排查真机故障用）。 */
   const failOpen = (text, diag) => {
+    wrap.textContent = ''
     wrap.append(label, makeNote(doc, 'warn', text))
     if (diag !== undefined) {
       let line = ''
@@ -884,18 +896,87 @@ function openQueueEditor(bubble, sessions, docOverride) {
 
   const session = resolveSession(sessions, sessionId)
   if (session === null) {
-    failOpen('当前会话还没准备好，稍后再试', queueDiag(null))
+    failOpen('当前会话还没准备好，稍后再试', queueDiag(null, { sessionId, bubbleKind }))
     return
   }
+  const bubbleText = bubbleTextOf(bubble, PENDING_TEXT_SKIP)
   const inbox = readInbox(session)
-  const resolved = resolvePendingItem(inbox, bubbleTextOf(bubble, PENDING_TEXT_SKIP))
-  if (resolved.ok !== true) {
-    failOpen(resolved.error, queueDiag(session))
+  const resolved = resolvePendingItem(inbox, bubbleText)
+  if (resolved.ok === true) {
+    buildQueueEditor(session, resolved.itemId, resolved.text, bubble, doc, wrap, label)
     return
   }
+  // 投影里没有这条：消息可能刚从输入框发出、宿主还没入队——此期间界面显示的
+  // 是本地回显（data-submission-echo），回显在 inbox 投影出现同 rpcId 行时
+  // 退役。回显还在就等它落库，别急着报错（2026-10-21 真机 bug：用户在这个
+  // 窗口里点「改待发送」，前两个版本都直接报「读不到」）。
+  if (hasPendingEcho(session, bubbleText)) {
+    waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind)
+    return
+  }
+  failOpen(resolved.error, queueDiag(session, { sessionId, bubbleKind }))
+}
 
+/** 在途轮询的节奏：200ms 一次，最多等 6s（宿主入队通常在 1s 内）。 */
+const INBOX_LANDING_POLL_MS = 200
+const INBOX_LANDING_TIMEOUT_MS = 6000
+
+/**
+ * 消息在途时的等待：轮询 inbox 投影，等这条消息落库后原地换成编辑器。
+ *
+ * 停下来的条件有三个：落库成功（换编辑器）、超时（如实报错 + 诊断）、
+ * wrap 被拔掉（用户按 Esc 或 closeEditor 抢先关掉——轮询回调自停）。
+ */
+function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind) {
+  const note = makeNote(doc, 'info', '消息正在进入队列，请稍候…')
+  wrap.append(label, note)
+  bubble.append(wrap)
+  openEditor = { wrap, doc, kind: 'queue-wait', anchor: bubble }
+  const deadline = Date.now() + INBOX_LANDING_TIMEOUT_MS
+  const timer = setInterval(() => {
+    if (openEditor === null || openEditor.wrap !== wrap || wrap.isConnected === false) {
+      clearInterval(timer)
+      return
+    }
+    const resolved = resolvePendingItem(readInbox(session), bubbleText)
+    if (resolved.ok === true) {
+      clearInterval(timer)
+      wrap.textContent = ''
+      buildQueueEditor(session, resolved.itemId, resolved.text, bubble, doc, wrap, label)
+      return
+    }
+    // 回显消失了但投影还是没有 = 消息没能入队（发送失败 / 已被宿主处理），
+    // 不用等满超时。
+    if (hasPendingEcho(session, bubbleText) !== true) {
+      clearInterval(timer)
+      openEditor = null
+      failOpen(
+        '这条消息没有进入待发送队列（可能发送失败或已被处理）。',
+        queueDiag(session, { sessionId, bubbleKind })
+      )
+      return
+    }
+    if (Date.now() >= deadline) {
+      clearInterval(timer)
+      openEditor = null
+      failOpen(
+        '这条消息一直没有进入待发送队列（可能已发出或被宿主拒绝）。若反复出现，请把下面的诊断信息反馈给插件作者。',
+        queueDiag(session, { sessionId, bubbleKind })
+      )
+    }
+  }, INBOX_LANDING_POLL_MS)
+  openEditor.poll = timer
+}
+
+/**
+ * 构造队列编辑器本体（textarea + 保存/取消）。
+ *
+ * 不负责把 wrap 挂上气泡——两个调用方（直接定位成功 / 轮询落库后）各自挂，
+ * 避免「轮询路径重复 append」。
+ */
+function buildQueueEditor(session, itemId, text, bubble, doc, wrap, label) {
   const area = doc.createElement('textarea')
-  area.value = resolved.text
+  area.value = text
   area.spellcheck = false
   area.setAttribute('aria-label', '编辑待发送消息')
   // 点击保险与 openBlockEditor 同源：真机上宿主会在 mousedown 之后把焦点
@@ -936,9 +1017,9 @@ function openQueueEditor(bubble, sessions, docOverride) {
   let saving = false
   const submit = async () => {
     if (saving === true) return
-    const text = String(area.value ?? '')
+    const next = String(area.value ?? '')
     // 与服务端同一条判据（index.js 825 行：必须含非空白字符）。
-    if (text.trim() === '') {
+    if (next.trim() === '') {
       status.textContent = '内容不能为空'
       return
     }
@@ -946,7 +1027,7 @@ function openQueueEditor(bubble, sessions, docOverride) {
     saveBtn.disabled = true
     cancelBtn.disabled = true
     status.textContent = '保存中…'
-    const failure = await submitQueueEdit(session, resolved.itemId, text)
+    const failure = await submitQueueEdit(session, itemId, next)
     if (failure === null) {
       // inbox 投影会自己刷新气泡，这里不需要重扫；焦点交还由 closeEditor 负责。
       closeEditor()
