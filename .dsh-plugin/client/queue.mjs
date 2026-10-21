@@ -35,6 +35,23 @@
 // 回显：投影空 + 回显文本匹配 = 消息在途，轮询等它落库，不能直接报错。
 // （2026-10-20 第一版修错了方向：去读 getSnapshot().queue，而真实桌面端宿主
 //  的 buildSnapshot 里根本没有 queue 字段——那份接口是从旧副本核对的。）
+//
+// ── 2026-10-21 三次修复：投影与点击时刻可能已经对不上 ─────────────────────
+// 真机诊断（bubbleKind:host、inboxNextStep:1、projectionRows:0、echoCount:0）
+// 逼出一个新认知：界面气泡只可能来自 next-step 里 source.kind === 'user' 的行
+// （ui-chat 源码逐字如此），而点击时刻同一份投影里那一行却不满足这个条件——
+// 两者不矛盾的唯一解释是**投影在气泡渲染之后又变了**：回合结束 claim 清空
+// next-step，随后插件/预置注入的非 user 行补进来，React 还没重渲染，用户点了
+// 旧气泡。所以定位与提示都要为此改写：
+//   1. **接管时预取锚点**：气泡出现的瞬间（投影与渲染一致）按文本解析出
+//      itemId；点击时先按 id 复核——行还在就直接开编辑器，不赌文本。
+//   2. **kind 过滤不放松**：宿主 prompt 走的永远是 user 行，kind 不同的行都是
+//      插件注入，不是用户待发送的消息，不给编辑（宽松回匹试过，会咬到注入行，
+//      已撤）。
+//   3. **诚实失败**：锚点失效、严格回匹不中、回显也没有，说明这条消息真的离开
+//      了队列（已被 claim 发出）——按「队列空 / 有同文本的非用户行 / 有行但
+//      都对不上」三种情况分别说明，并交叉验证对话里是否已有同文本的已发送
+//      气泡，别让「读不到队列」这种误导性文案再出现。
 
 /** inbox 投影键。 */
 export const INBOX_KEY = 'inbox'
@@ -168,6 +185,34 @@ export function readInbox(session) {
 }
 
 /**
+ * 读 next-step 的**全部**行（不按 source.kind 过滤）。
+ *
+ * 存在的理由（2026-10-21 真机 bug 三修）：界面渲染 pending 气泡的条件是
+ * `source.kind === 'user'`（ui-chat 逐字如此），但点击时刻读到的投影可能已经
+ * 变了——回合结束 claim 会清空 next-step，随后插件/预注入的行又补进来。此时
+ * 「按 kind 过滤」会把唯一可用的文本锚点一起滤掉。这一份不过滤的行给两个
+ * 下游用：按 itemId 复核锚点、按文本做兜底回匹。
+ *
+ * @param {unknown} session ISession
+ * @returns {unknown[] | null} null = 读不到投影（不是空队列）
+ */
+export function readInboxRows(session) {
+  try {
+    const projections = session === null || session === undefined ? undefined : session.projections
+    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
+    if (typeof faceOf !== 'function') return null
+    const face = faceOf(INBOX_KEY)
+    if (face === null || face === undefined) return null
+    if (typeof face.getSnapshot !== 'function') return null
+    const normalized = normalizeInbox(face.getSnapshot())
+    if (normalized === null) return null
+    return normalized.nextStep
+  } catch {
+    return null
+  }
+}
+
+/**
  * 读失败时的诊断快照（真机 bug 的排查设施）。
  *
  * 只读不写、全部 try 兜底；产物给 console 和控制台诊断行，用来回答「到底哪一级
@@ -178,7 +223,8 @@ export function readInbox(session) {
  * 字段，界面气泡的真源是 inbox 投影，在途消息只存在于 pendingSubmissions。
  *
  * @param {unknown} session resolveSession 的产物（可能是 null）
- * @param {{ sessionId?: unknown, bubbleKind?: string }} [extra]
+ * @param {{ sessionId?: unknown, bubbleKind?: string, bubbleTextHead?: string,
+ *            anchor?: unknown, sentInTranscript?: boolean }} [extra]
  * @returns {Record<string, unknown>} 纯 JSON 可序列化对象
  */
 export function queueDiag(session, extra = {}) {
@@ -228,8 +274,75 @@ export function queueDiag(session, extra = {}) {
       out.echoCount = echoes.length
       out.echoTexts = echoes.map(e => `${String(e.time)}:${e.text.slice(0, 30)}`)
     } catch { out.echoCount = 'throw' }
+    // next-step 每行的速写：点击时刻投影里到底有谁、kind 是什么。真机 bug 的
+    // 分歧点全在这一层（inboxNextStep 有行而过滤后为 0 = 行的 kind 不是 user）。
+    try {
+      out.nextStepRows = describeInboxRows(readInboxRows(session))
+    } catch { out.nextStepRows = 'throw' }
+    try {
+      const snap = typeof session.getSnapshot === 'function' ? session.getSnapshot() : null
+      const subs = snap !== null && typeof snap === 'object' ? snap.pendingSubmissions : null
+      if (Array.isArray(subs)) {
+        const tally = { total: subs.length, steering: 0, queued: 0, transcript: 0, other: 0 }
+        for (const s of subs) {
+          const p = s === null || typeof s !== 'object' ? undefined : s.placement
+          if (p === 'steering') tally.steering += 1
+          else if (p === 'queued') tally.queued += 1
+          else if (p === 'transcript') tally.transcript += 1
+          else tally.other += 1
+        }
+        out.subPlacements = tally
+      }
+      const perr = snap !== null && typeof snap === 'object' ? snap.promptError : null
+      if (perr !== null && perr !== undefined) {
+        out.promptError = typeof perr === 'object' && typeof perr.error?.code === 'string'
+          ? perr.error.code
+          : 'present'
+      }
+    } catch { out.subPlacements = 'throw' }
     out.projectionRows = (readInboxProjection(session) ?? []).length
+    // 调用方补充的定位线索：气泡文本头、锚点、对话里是否已有同文本的已发送气泡。
+    if (extra.bubbleTextHead !== undefined) out.bubbleTextHead = String(extra.bubbleTextHead).slice(0, 40)
+    if (extra.anchor !== undefined) out.anchor = extra.anchor
+    if (extra.sentInTranscript !== undefined) out.sentInTranscript = extra.sentInTranscript === true
   } catch { /* 诊断自身绝不影响主流程 */ }
+  return out
+}
+
+/**
+ * next-step 行的安全速写（读属性全程兜底，单行坏掉不影响其它行）。
+ *
+ * 回答「点击时刻投影里这一行是什么」：id、source.kind、文本头。kind 读不出来
+ * （getter 抛异常之类）记 'throw'，与 'absent' 区分——前者说明值结构异常，
+ * 后者说明这行本来就没有 source。
+ *
+ * @param {unknown[] | null} rows readInboxRows 的产物
+ * @returns {Array<{i: number, id: string, kind: string, len: number, head: string}> | string}
+ */
+export function describeInboxRows(rows) {
+  if (rows === null) return 'unreadable'
+  if (!Array.isArray(rows)) return 'not-array'
+  const out = []
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]
+    const entry = { i, id: '?', kind: '?', len: 0, head: '' }
+    try {
+      const id = rowId(row)
+      entry.id = id ?? '(no-id)'
+    } catch { entry.id = 'throw' }
+    try {
+      const source = row.source
+      if (source === null || source === undefined) entry.kind = 'absent'
+      else if (typeof source !== 'object') entry.kind = typeof source
+      else entry.kind = typeof source.kind === 'string' ? source.kind : String(source.kind)
+    } catch { entry.kind = 'throw' }
+    try {
+      const parts = contentText(rowContent(row))
+      entry.len = parts.text.length
+      entry.head = parts.text.slice(0, 30)
+    } catch { entry.head = 'throw' }
+    out.push(entry)
+  }
   return out
 }
 
@@ -337,6 +450,68 @@ export function bubbleTextOf(row, skipSelector = '[data-clock]') {
  *          | { ok: false, error: string }}
  */
 export function resolvePendingItem(inbox, bubbleText) {
+  return matchPendingRow(inbox, bubbleText)
+}
+
+/**
+ * 按 itemId 直接定位（强锚点复核）。
+ *
+ * 接管气泡时当场按文本解析出的 itemId 存在这里；点击时用它复核——行还在队列里
+ * 就直接开编辑器，不用再赌文本。行已离开队列（回合结束被 claim）时返回失败，
+ * 由上层走完整路径并给出「已经发出去了」的诚实提示。
+ *
+ * @param {unknown[] | null} rows readInboxRows 的产物
+ * @param {string} itemId 接管时记下的行 id
+ * @returns {{ ok: true, itemId: string, text: string, textOnly: boolean }
+ *          | { ok: false, error: string }}
+ */
+export function resolvePendingItemById(rows, itemId) {
+  if (rows === null) return { ok: false, error: '读不到待发送队列，请稍后重试' }
+  if (typeof itemId !== 'string' || itemId === '') return { ok: false, error: '锚点无效' }
+  for (const row of rows) {
+    if (rowId(row) !== itemId) continue
+    const parts = contentText(rowContent(row))
+    if (!parts.textOnly) return { ok: false, error: '这条待发送消息含附件，暂不支持编辑' }
+    return { ok: true, itemId, text: parts.text, textOnly: true }
+  }
+  return { ok: false, error: '这条消息已经不在队列里了（可能已发出）' }
+}
+
+/**
+ * next-step 里是否存在与气泡文本相同的行（kind 不设限）。
+ *
+ * 只回答「是文本对不上，还是行被 kind 过滤掉了」这一个问题，给失败文案指路：
+ * 有同文本行而不能编辑 = 那行不是用户消息（注入行）；完全没有同文本行 =
+ * 用户点的那条真的离开了队列（回合结束被 claim 后插件又补了行）。
+ *
+ * @param {unknown[] | null} rows readInboxRows 的产物
+ * @param {string} bubbleText 气泡可见文本
+ * @returns {boolean}
+ */
+export function hasTextMatchRow(rows, bubbleText) {
+  if (rows === null || !Array.isArray(rows)) return false
+  const raw = String(bubbleText ?? '')
+  const collapsed = collapseWhitespace(raw)
+  if (raw === '') return false
+  for (const row of rows) {
+    const text = contentText(rowContent(row)).text
+    if (text === '') continue
+    if (text === raw || collapseWhitespace(text) === collapsed) return true
+  }
+  return false
+}
+
+/**
+ * 两级文本匹配 + 唯一性约束，只认 source.kind === 'user' 的行（与界面渲染
+ * 条件逐字对齐——宿主 prompt 走的永远是 user 行，kind 不同的行都是插件注入，
+ * 不是用户待发送的消息，不给编辑）。
+ *
+ * @param {unknown[] | null} inbox readInbox 的产物
+ * @param {string} bubbleText 气泡可见文本
+ * @returns {{ ok: true, itemId: string, text: string, textOnly: boolean }
+ *          | { ok: false, error: string }}
+ */
+function matchPendingRow(inbox, bubbleText) {
   if (inbox === null) return { ok: false, error: '读不到待发送队列，请稍后重试' }
   const raw = String(bubbleText ?? '')
   const collapsed = collapseWhitespace(raw)

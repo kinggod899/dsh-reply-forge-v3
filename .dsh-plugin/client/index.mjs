@@ -30,8 +30,9 @@ import {
   recordNeedsRefresh, domSignatureOf,
 } from './record.mjs'
 import {
-  readInbox, resolvePendingItem, bubbleTextOf, submitQueueEdit, queueDiag,
-  hasPendingEcho,
+  readInbox, readInboxRows, resolvePendingItem,
+  resolvePendingItemById, hasTextMatchRow, bubbleTextOf, submitQueueEdit, queueDiag,
+  hasPendingEcho, collapseWhitespace,
 } from './queue.mjs'
 
 export const name = 'dsh-reply-forge-v3'
@@ -51,6 +52,15 @@ export const inject = ['slots', 'sessions']
 
 /** apply() 注入的 sessions 服务（模块级函数拿不到 apply 的 ctx）。 */
 let sessionsRef = null
+
+/**
+ * 待发送气泡 → 接管时预取的定位锚点。
+ *
+ * 气泡出现的瞬间，投影与宿主渲染是一致的（气泡就是从那批行渲染出来的），此时
+ * 按文本解析出的 itemId 是**最可信的锚点**。点击时先按 id 复核：行还在就直接
+ * 开编辑器，不必再赌文本回匹。WeakMap 保证气泡被宿主卸载后锚点自动消失。
+ */
+const pendingAnchors = new WeakMap()
 
 const SCAN_DEBOUNCE_MS = 220
 const EDIT_ATTR = 'data-rf3-edited'
@@ -900,21 +910,68 @@ function openQueueEditor(bubble, sessions, docOverride) {
     return
   }
   const bubbleText = bubbleTextOf(bubble, PENDING_TEXT_SKIP)
+  const bubbleHead = bubbleText.slice(0, 40)
+
+  // ① 强锚点：接管气泡时预取的 itemId 还在队列里就直接用，不赌文本。
+  //    行已离开队列（回合结束被 claim）才会失败——那时下面的完整路径会给出
+  //    「已经发出去了」的诚实结论。
+  const anchor = pendingAnchors.get(bubble)
+  if (anchor !== undefined) {
+    const byId = resolvePendingItemById(readInboxRows(session), anchor.itemId)
+    if (byId.ok === true) {
+      buildQueueEditor(session, byId.itemId, byId.text, bubble, doc, wrap, label)
+      return
+    }
+  }
+
+  // ② 严格回匹：界面同源条件（next-step 且 source.kind === 'user'）。
+  //    kind 不放松——宿主 prompt 走的永远是 user 行，kind 不同的行都是插件
+  //    注入，不是用户待发送的消息。
   const inbox = readInbox(session)
   const resolved = resolvePendingItem(inbox, bubbleText)
   if (resolved.ok === true) {
     buildQueueEditor(session, resolved.itemId, resolved.text, bubble, doc, wrap, label)
     return
   }
-  // 投影里没有这条：消息可能刚从输入框发出、宿主还没入队——此期间界面显示的
-  // 是本地回显（data-submission-echo），回显在 inbox 投影出现同 rpcId 行时
-  // 退役。回显还在就等它落库，别急着报错（2026-10-21 真机 bug：用户在这个
-  // 窗口里点「改待发送」，前两个版本都直接报「读不到」）。
+
+  // ③ 在途等待：投影里没有这条，但消息可能刚从输入框发出——此期间界面显示本地
+  //    回显（data-submission-echo），回显在 inbox 投影出现同 rpcId 行时退役。
+  //    回显还在就等它落库，别急着报错（2026-10-21 真机 bug：用户在这个窗口里
+  //    点「改待发送」，前两个版本都直接报「读不到」）。
   if (hasPendingEcho(session, bubbleText)) {
-    waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind)
+    waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind, bubbleHead, anchor)
     return
   }
-  failOpen(resolved.error, queueDiag(session, { sessionId, bubbleKind }))
+
+  // ④ 诚实失败：按「为什么没匹上」分别说明，别再一句笼统的「无法定位」。
+  //    队列空 / 有同文本但非用户行（插件注入）/ 有行但都对不上（用户点的那条
+  //    已离开队列——回合结束 claim 后插件又补了行）。最后交叉验证对话里是否
+  //    已有同文本的已发送气泡：有的话这条消息已经发出去了，队列编辑本就无能为力。
+  const rows = readInboxRows(session)
+  const sent = findSentBubble(doc, bubbleText)
+  const specific = resolved.error.includes('附件') || resolved.error.includes('多个相同')
+  const sameText = hasTextMatchRow(rows, bubbleText)
+  let why
+  if (rows === null) {
+    why = '读不到待发送队列（投影读取失败），请稍后重试'
+  } else if (rows.length === 0) {
+    why = '待发送队列是空的——这条消息已经不在队列里了（可能已开始生成）'
+  } else if (specific) {
+    // 附件 / 同文本撞车是比「不在队列里」更具体的原因，原样透出。
+    why = resolved.error
+  } else if (sameText === true) {
+    why = '队列里有同文本的消息，但它不是待发送的用户消息，无法定位'
+  } else {
+    why = `队列里有 ${rows.length} 条待发送消息，但都不是你点的这条（它可能已经发出去了）`
+  }
+  if (sent === true) {
+    why += '；对话里已经能看到这条消息，说明它已经发送成功，待发送编辑只对还没发送的消息有效'
+  }
+  failOpen(why, queueDiag(session, {
+    sessionId, bubbleKind, bubbleTextHead: bubbleHead,
+    sentInTranscript: sent,
+    anchor: anchor === undefined ? 'none' : { itemId: anchor.itemId },
+  }))
 }
 
 /** 在途轮询的节奏：200ms 一次，最多等 6s（宿主入队通常在 1s 内）。 */
@@ -926,8 +983,15 @@ const INBOX_LANDING_TIMEOUT_MS = 6000
  *
  * 停下来的条件有三个：落库成功（换编辑器）、超时（如实报错 + 诊断）、
  * wrap 被拔掉（用户按 Esc 或 closeEditor 抢先关掉——轮询回调自停）。
+ *
+ * @param {string} [bubbleHead] 气泡文本头（只进诊断）
+ * @param {{ itemId: string } | undefined} [anchor] 接管时预取的锚点（只进诊断）
  */
-function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind) {
+function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, failOpen, sessionId, bubbleKind, bubbleHead = '', anchor = undefined) {
+  const diagExtra = {
+    sessionId, bubbleKind, bubbleTextHead: bubbleHead,
+    anchor: anchor === undefined ? 'none' : { itemId: anchor.itemId },
+  }
   const note = makeNote(doc, 'info', '消息正在进入队列，请稍候…')
   wrap.append(label, note)
   bubble.append(wrap)
@@ -952,7 +1016,7 @@ function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, fail
       openEditor = null
       failOpen(
         '这条消息没有进入待发送队列（可能发送失败或已被处理）。',
-        queueDiag(session, { sessionId, bubbleKind })
+        queueDiag(session, diagExtra)
       )
       return
     }
@@ -961,7 +1025,7 @@ function waitForInboxLanding(session, bubbleText, bubble, doc, wrap, label, fail
       openEditor = null
       failOpen(
         '这条消息一直没有进入待发送队列（可能已发出或被宿主拒绝）。若反复出现，请把下面的诊断信息反馈给插件作者。',
-        queueDiag(session, { sessionId, bubbleKind })
+        queueDiag(session, diagExtra)
       )
     }
   }, INBOX_LANDING_POLL_MS)
@@ -1053,6 +1117,9 @@ function buildQueueEditor(session, itemId, text, bubble, doc, wrap, label) {
  *
  * 宿主每次刷新队列都会重渲染这些气泡，所以接管必须像 takeBlock 一样可重复
  * 执行——新节点没标记就接管，老节点有标记就跳过。
+ *
+ * 接管的同时**预取定位锚点**（见 pendingAnchors）：此刻投影与渲染一致，按文本
+ * 解析出的 itemId 是点击时可复核的强锚点。
  */
 function takePendingBubble(bubble, sessions, doc) {
   if (bubble.hasAttribute(PENDING_TAKEN_ATTR)) return
@@ -1068,6 +1135,59 @@ function takePendingBubble(bubble, sessions, doc) {
   btn.setAttribute('data-rf3-pending-btn', '')
   bar.append(btn)
   bubble.append(bar)
+  const anchor = prefetchPendingAnchor(bubble, sessions, doc)
+  if (anchor !== null) pendingAnchors.set(bubble, anchor)
+}
+
+/**
+ * 接管瞬间按气泡文本预取 itemId。
+ *
+ * 只读投影、全部兜底；失败（投影还没有这行、文本撞车、会话没就绪）就返回
+ * null——点击时会走完整定位路径，预取只是优化，不是前提。
+ *
+ * @returns {{ itemId: string } | null}
+ */
+function prefetchPendingAnchor(bubble, sessions, doc) {
+  try {
+    const session = resolveSession(sessions, currentSessionId(doc))
+    if (session === null) return null
+    const text = bubbleTextOf(bubble, PENDING_TEXT_SKIP)
+    const resolved = resolvePendingItem(readInbox(session), text)
+    if (resolved.ok !== true) return null
+    return { itemId: resolved.itemId }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 对话里是否已有同文本的**已发送**用户气泡。
+ *
+ * 用于「点击的待发送气泡已经不在队列里」时交叉验证：消息若已被回合 claim，
+ * 它会以普通用户消息（无 data-pending-steering）出现在对话里。宿主用户行的
+ * class 是 CSS module 哈希名（cJsG2q_userRow 之类，会随构建变），所以用
+ * `[class*="userRow"]` 宽容匹配。
+ *
+ * @param {Document} doc
+ * @param {string} text 气泡可见文本
+ * @returns {boolean}
+ */
+function findSentBubble(doc, text) {
+  try {
+    const target = collapseWhitespace(text)
+    if (target === '') return false
+    const nodes = doc.querySelectorAll('[class*="userRow"]')
+    for (const node of nodes) {
+      if (typeof node.hasAttribute !== 'function') continue
+      // pending 气泡（含自己点的这条）不算「已发送」。
+      if (node.hasAttribute('data-pending-steering')) continue
+      const seen = collapseWhitespace(bubbleTextOf(node, PENDING_TEXT_SKIP))
+      if (seen !== '' && seen === target) return true
+    }
+    return false
+  } catch {
+    return false
+  }
 }
 
 /**

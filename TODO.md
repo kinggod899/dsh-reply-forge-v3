@@ -5,12 +5,12 @@
 > [使用说明.md](./使用说明.md)，深度开发日志在
 > 开发期工作区记忆目录（不随仓库分发），项目级记忆在 `.workbuddy-ai/memory/`。
 
-## 当前状态（2026-10-20 复核）
+## 当前状态（2026-10-21 复核）
 
-- 版本 `3.1.0`（**v3.2.0 待发**：两个 PR 已合并进 main，本机已装待用户真机测试）；
-  测试 **272 项 / 14 套**（10-20 实测：`node --test "tests/*.test.mjs"` 14/14 全绿；
-  其中 2 套（persistence/projection）需本机宿主包，缺则 SKIP 不计失败；client 套件 74 项，
-  `build-client.mjs --check` 字节一致）。
+- 版本 `3.1.0`（**v3.2.0 待发**：五个 PR 已合并进 main，本机已装待用户真机测试）；
+  测试 **298 项 / 14 套**（10-21 实测：逐文件跑 13/13 全绿（`node --test` 按文件计），
+  其中 2 套（persistence/projection）需本机宿主包，缺则 SKIP 不计失败；client 套件 80 项、
+  queue 63 项，`build-client.mjs --check` 字节一致）。
 - **仓库管理纪律（2026-10-20 用户拍板改）**：废除「main 单一干净 commit」，
   改为常规多 commit + PR 流程。每个特性/修复各一个分支、一个 PR，合并用
   **merge commit**（保留完整 commit message，不 squash、不重写公开历史）。
@@ -73,7 +73,7 @@
 | 4 | 关插件重启回归：`关闭插件.bat` → 重启 → 会话可开、伪造退原文 | ⬜ 待用户 | 再 `启用插件.bat` 验恢复 |
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审 |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词、tarball 钉 v3.1.0；README 中英双版已加收录注记 |
-| 7 | **v3.2.0 发布**（inbox 队列编辑 + 三个 bug 修复） | 🔵 代码已合并（PR #1/#2/#4 + 新 PR：在途等待 + 长文本按钮），本机待装新版，用户真机测试后发版 | 真机 bug 二修：PR #4 的「`getSnapshot().queue` 镜像源」是**旧副本接口**（真实桌面端宿主 buildSnapshot 无 queue 字段）→ 已回退为 inbox 投影单一权威源（与宿主 UI `useProjection("inbox")` 逐字对齐）+ 新增在途检测：`getSnapshot().pendingSubmissions` 回显匹配即轮询等落库（200ms/6s），回显消失=入队失败快失败；另修拾取层：markdown 原始 HTML 的自定义元素/语义标签计入块级（长文本回复有按钮）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
+| 7 | **v3.2.0 发布**（inbox 队列编辑 + 三个 bug 修复） | 🔵 代码已合并（PR #1/#2/#4/#5/#6），本机待装新版，用户真机测试后发版 | 真机 bug 三修（PR #6）：诊断显示 bubbleKind:host + inboxNextStep:1 + projectionRows:0——按 ui-chat 源码，宿主气泡只可能来自 next-step 里 `source.kind === 'user'` 的行，点击时刻同一投影却不满足该条件 ⟹ 投影在气泡渲染后又变了（回合结束 claim 清空 next-step、插件补行，React 未重渲染，用户点了旧气泡）。修复=强锚点（接管时预取 itemId，点击按 id 复核，行在直接开编辑器）+ kind 过滤不放松（宿主 prompt 永远走 user 行，宽松回匹试过会咬到注入行已撤）+ 诚实失败（队列空/同文本非用户行/都对不上分别说明，findSentBubble 交叉验证对话里已发送气泡）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
 
 ## 不可破的规则（改代码前必读）
 

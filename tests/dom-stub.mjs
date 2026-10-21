@@ -175,6 +175,15 @@ export function match(el, sel) {
     for (const part of parts) {
       if (part[1] !== undefined) {
         const body = part[1]
+        // [attr*="v"]：属性包含（宿主的 CSS module 哈希类名靠它匹配）。
+        const starEq = body.indexOf('*=')
+        if (starEq >= 0) {
+          const k = body.slice(0, starEq)
+          const v = body.slice(starEq + 2).replace(/^["']|["']$/g, '')
+          const have = el.hasAttribute(k) ? String(el.getAttribute(k)) : ''
+          if (!have.includes(v)) return false
+          continue
+        }
         const eq = body.indexOf('=')
         if (eq < 0) {
           if (!el.hasAttribute(body)) return false
