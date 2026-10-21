@@ -7,32 +7,34 @@
 //   - 改队列（本模块）→ 消息还没进日志，无新事件、不动已提交字节、
 //     sessionId 不变、provider 缓存不受影响。
 //
-// 接口全部来自宿主 @deepseek-ai/dsh-api-session-controller，三条路径都经
-// 真机源码核对过，不是照 README 抄：
-//   1. 读：**两个源**，UI 真源优先——
-//      a. session.getSnapshot().queue（SessionQueueMirror，瞬态队列镜像）。
-//         宿主聊天界面渲染 pending 气泡的就是这一份
-//         （dsh-client-ui-chat：`const inbox = useSession(s => s.queue)`，
-//         再按 placement === 'steering' 过滤）。行形状
-//         {id, placement, rpcId?, content, preview, text}，其中
-//         placement: 'steering' = 气泡可见的插入消息，'queued' = next-turn
-//         排队（不渲染气泡），'context' = 上下文注入（不是用户消息）。
-//      b. session.projections.faceOf('inbox').getSnapshot()（持久投影仓）。
-//         行形状 {id, content, source: {kind, rpcId?}}，source.kind ===
-//         'user' 的 next-step 行同样就是气泡那条。
-//      两个源都拿不到才判「读不到」；任一有数据就合并（按 id 去重，镜像优先）。
-//   2. 定位：气泡 DOM 上**没有任何 id 类属性**（只有 data-pending-steering /
-//      data-submission-echo 两个布尔），所以 itemId 只能靠文本回匹。这是宿主
-//      的限制，不是我们偷懒。
+// 接口全部来自宿主 @deepseek-ai/dsh-api-session-controller，路径都经**桌面端
+// 真机源码**（app.asar 内包，不是 E:/game/DSH 那份旧副本）核对：
+//   1. 读：以 inbox 投影为权威源——
+//      session.projections.faceOf('inbox').getSnapshot()
+//        → { 'next-turn': [...], 'next-step': [...] }。
+//      宿主聊天界面渲染 pending 气泡的就是这一份（dsh-client-ui-chat：
+//      `const inbox = useProjection("inbox")` →
+//      `inbox["next-step"].filter(m => m.source.kind === "user")` →
+//      PendingSteeringBubble，无 data-submission-echo 标记）。
+//      行形状 {id, content, source: {kind, rpcId?}}，itemId = message.id。
+//   2. 在途检测：消息刚发出、宿主还没入队时，界面显示的是**本地回显**
+//      （PendingSubmissionBubble，带 data-submission-echo），数据在
+//      session.getSnapshot().pendingSubmissions（{requestId, placement,
+//      time, text, attachments}）。回显在 inbox 投影出现同 rpcId 行时退役，
+//      所以「投影空 + 回显匹配」= 消息在途，等它落库即可。
+//      注意：真实宿主的 getSnapshot() **没有 queue 字段**（SessionQueueMirror
+//      那一支是旧版才有），别按旧副本写代码。
 //   3. 写：session.updateQueue(itemId, { kind: 'edit', content: [...] })。
-//      宿主 handler 用 message.id 在 agent.inbox 里定位（index.js:828-842），
-//      两个源的 row.id 恰好都是 message.id，所以传给哪个源的 id 都成立。
+//      宿主 handler 用 message.id 在 agent.inbox 的 next-turn/next-step 里
+//      定位并 replace（index.js updateQueue handler）。
 //
-// 为什么必须双源（2026-10-20 真机 bug）：投影仓的 'inbox' 行只靠控制流基线
-// seed 或 projection 帧推送，真机上出现过「气泡明明在，projections 的 'inbox'
-// 键却是 undefined」——入口一点就报「读不到待发送队列」。镜像那份由 queue
-// 帧驱动（replaceControl / handleControlFrame），与界面同源同刷新，
-// getSnapshot() 前还会 ensureFresh() 同步重建，所以拿它当第一源。
+// 为什么必须双机制（2026-10-21 真机 bug 二次修复）：inbox 投影是宿主界面的
+// 同源数据（useProjection("inbox")），权威；但消息从输入框发出到投影帧落库
+// 之间有一个窗口，界面此期间显示本地回显（pendingSubmissions），投影还是空
+// 的——用户在窗口里点「改待发送」只会读到空投影。所以除了读投影，还要认识
+// 回显：投影空 + 回显文本匹配 = 消息在途，轮询等它落库，不能直接报错。
+// （2026-10-20 第一版修错了方向：去读 getSnapshot().queue，而真实桌面端宿主
+//  的 buildSnapshot 里根本没有 queue 字段——那份接口是从旧副本核对的。）
 
 /** inbox 投影键。 */
 export const INBOX_KEY = 'inbox'
@@ -67,59 +69,73 @@ export function normalizeInbox(snapshot) {
 }
 
 /**
- * 读会话快照里的瞬态队列镜像（SessionQueueMirror）。
+ * 读本地发送回显（pendingSubmissions）。
  *
- * 这是**界面上看得见的那一份**：宿主聊天界面渲染 pending 气泡的数据源就是
- * `useSession(s => s.queue)`（dsh-client-ui-chat），本模块与界面同源，
- * 不存在「气泡在、队列空」的错位。
- *
- * 行形状（client.js SessionQueueMirror.replace）：
- *   { id, messageId, placement, rpcId?, content, preview, text }
- * placement 三种：'steering'（气泡可见的插入消息，即 next-step 的 user 行）、
- * 'queued'（next-turn 排队，不渲染气泡）、'context'（上下文注入，非用户消息）。
+ * 回显是消息已从输入框发出、但宿主 inbox 投影里还没有对应行时的界面数据
+ * （dsh-client-ui-chat 的 PendingSubmissionBubble）。形状由控制器
+ * client.js 的 beginSubmission() 写入：
+ *   { requestId, placement: 'steering'|'queued'|'transcript', time, text, attachments }
+ * 只有 placement === 'steering' 的会渲染成 pending 气泡（界面条件与投影行一致）。
  *
  * @param {unknown} session ISession
- * @returns {Array<{ slot: 'next-turn' | 'next-step', row: object }> | null}
- *          null = 读不到快照（不是空队列）
+ * @returns {Array<{ requestId: string, text: string, time: number }>}
+ *          空数组 = 没有回显（不是错误）
  */
-export function readQueueMirror(session) {
+export function readPendingEchoes(session) {
   try {
-    if (session === null || typeof session !== 'object') return null
-    if (typeof session.getSnapshot !== 'function') return null
+    if (session === null || typeof session !== 'object') return []
+    if (typeof session.getSnapshot !== 'function') return []
     const snap = session.getSnapshot()
-    const queue = snap !== null && typeof snap === 'object' ? snap.queue : undefined
-    if (!Array.isArray(queue)) return null
-    const rows = []
-    for (const item of queue) {
+    const list = snap !== null && typeof snap === 'object' ? snap.pendingSubmissions : undefined
+    if (!Array.isArray(list)) return []
+    const out = []
+    for (const item of list) {
       if (item === null || typeof item !== 'object') continue
-      const id = typeof item.id === 'string' && item.id !== '' ? item.id : undefined
-      if (id === undefined) continue
-      const content = Array.isArray(item.content) ? item.content : []
-      // 归一成与投影行一致的内部形状，resolvePendingItem 不用关心来源。
-      const row = { id, content, source: { kind: PENDING_SOURCE_KIND } }
-      if (item.placement === 'steering') rows.push({ slot: 'next-step', row })
-      else if (item.placement === 'queued') rows.push({ slot: 'next-turn', row })
-      // placement === 'context'：上下文注入行，不是用户发的，跳过。
+      if (item.placement !== 'steering') continue
+      const requestId = typeof item.requestId === 'string' && item.requestId !== '' ? item.requestId : undefined
+      const text = typeof item.text === 'string' ? item.text : ''
+      if (requestId === undefined) continue
+      out.push({ requestId, text, time: typeof item.time === 'number' ? item.time : 0 })
     }
-    return rows
+    return out
   } catch {
-    return null
+    return []
   }
 }
 
 /**
- * 读持久投影仓里的 inbox 投影。
+ * 在途判断（宽松版）：任一回显与气泡文本相当即算在途。
+ *
+ * 回显只回答「等不等」这一个问题——真正选哪一条由消息落库后
+ * resolvePendingItem 对投影行做严格唯一匹配。两条相同文本的在途消息不该
+ * 让等待提前失败（等它们都落库后由 resolvePendingItem 报歧义，那是诚实的
+ * 错误），所以这里不比唯一性。
+ *
+ * @param {unknown} session ISession
+ * @param {string} bubbleText 气泡可见文本
+ * @returns {boolean}
+ */
+export function hasPendingEcho(session, bubbleText) {
+  const raw = String(bubbleText ?? '')
+  if (raw === '') return false
+  const collapsed = collapseWhitespace(raw)
+  return readPendingEchoes(session).some(e =>
+    e.text === raw || (collapsed !== '' && collapseWhitespace(e.text) === collapsed))
+}
+
+/**
+ * 读持久投影仓里的 inbox 投影——**界面同源的权威源**。
  *
  * faceOf 返回 identity-stable 的 face，**永远存在**（宿主导注释：absence is
  * an `undefined` snapshot, never a missing face），所以判空要落在 snapshot 上。
  *
- * 真机上这个源可能整键缺失（控制流基线 seed 时该会话的 agent loop 还没注册
- * inbox 投影，此后又没有新的投影帧），表现就是「气泡在、投影 undefined」——
- * 所以它只能是第二源，不能单独依赖。见 readQueueMirror 的说明。
+ * **只收 next-step 里 source.kind === 'user' 的行**——与宿主界面渲染条件
+ * 逐字对齐（ui-chat：`inbox["next-step"].filter(m => m.source.kind === "user")`）。
+ * next-turn 排队消息不渲染气泡，用户点不到；把它收进来只会让同文本的等待项
+ * 参与回匹、平白制造撞车。
  *
  * @param {unknown} session ISession
- * @returns {Array<{ slot: 'next-turn' | 'next-step', row: object }> | null}
- *          null = 读不到投影（不是空队列）
+ * @returns {unknown[] | null} null = 读不到投影（不是空队列）
  */
 export function readInboxProjection(session) {
   try {
@@ -131,14 +147,7 @@ export function readInboxProjection(session) {
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())
     if (normalized === null) return null
-    const rows = []
-    for (const row of normalized.nextTurn) {
-      if (isPendingUserRow(row)) rows.push({ slot: 'next-turn', row })
-    }
-    for (const row of normalized.nextStep) {
-      if (isPendingUserRow(row)) rows.push({ slot: 'next-step', row })
-    }
-    return rows
+    return normalized.nextStep.filter(isPendingUserRow)
   } catch {
     // 投影读失败与「队列为空」是两回事，但都只能让上层提示稍后再试。
     return null
@@ -146,43 +155,37 @@ export function readInboxProjection(session) {
 }
 
 /**
- * 读当前会话的待发送队列：镜像源优先，投影源兜底，按 id 去重合并。
+ * 读当前会话的待发送队列（inbox 投影，界面同源）。
  *
- * 两个源都读不到才返回 null（上层提示「读不到队列」）；任一可读就合并——
- * 包括「可读但为空」（上层提示「定位不到」，与「读不到」是两种故障）。
+ * 只返回 `nextStep` 里 source.kind === 'user' 的行——即会渲染成 pending
+ * 气泡的那一批；`next-turn` 用户看不见，不返回。
  *
  * @param {unknown} session ISession
- * @returns {{ nextTurn: unknown[], nextStep: unknown[] } | null}
+ * @returns {unknown[] | null} null = 读不到投影（不是空队列）
  */
 export function readInbox(session) {
-  const mirror = readQueueMirror(session)
-  const projection = readInboxProjection(session)
-  if (mirror === null && projection === null) return null
-  const seen = new Set()
-  const nextTurn = []
-  const nextStep = []
-  for (const { slot, row } of [...(mirror ?? []), ...(projection ?? [])]) {
-    if (seen.has(row.id)) continue
-    seen.add(row.id)
-    if (slot === 'next-turn') nextTurn.push(row)
-    else nextStep.push(row)
-  }
-  return { nextTurn, nextStep }
+  return readInboxProjection(session)
 }
 
 /**
- * 读失败时的诊断快照（2026-10-20 真机 bug 的排查设施）。
+ * 读失败时的诊断快照（真机 bug 的排查设施）。
  *
  * 只读不写、全部 try 兜底；产物给 console 和控制台诊断行，用来回答「到底哪一级
- * 挂了」：session 拿没拿到、projections 在不在、投影仓有哪些键、inbox 键值是
- * 什么、快照队列有幾行、两个源各读出幾条。
+ * 挂了」：session 拿没拿到、projections 在不在、inbox 投影是什么（键、行数、
+ * seq）、本地回显有几条、点到的气泡是宿主气泡还是本地回显。
+ *
+ * 2026-10-21 起以 app.asar 内真实桌面端宿主为准：getSnapshot() 没有 queue
+ * 字段，界面气泡的真源是 inbox 投影，在途消息只存在于 pendingSubmissions。
  *
  * @param {unknown} session resolveSession 的产物（可能是 null）
+ * @param {{ sessionId?: unknown, bubbleKind?: string }} [extra]
  * @returns {Record<string, unknown>} 纯 JSON 可序列化对象
  */
-export function queueDiag(session) {
+export function queueDiag(session, extra = {}) {
   const out = {}
   try {
+    if (extra.sessionId !== undefined) out.sessionId = String(extra.sessionId)
+    if (extra.bubbleKind !== undefined) out.bubbleKind = extra.bubbleKind
     out.hasSession = session !== null && typeof session === 'object'
     if (!out.hasSession) return out
     out.ctor = typeof session.constructor?.name === 'string' ? session.constructor.name : '?'
@@ -199,7 +202,21 @@ export function queueDiag(session) {
         const face = projections.faceOf(INBOX_KEY)
         out.face = face === null || face === undefined ? 'absent' : typeof face
         const snap = typeof face?.getSnapshot === 'function' ? face.getSnapshot() : undefined
-        out.inboxSnapshot = snap === undefined ? 'undefined' : snap === null ? 'null' : typeof snap
+        if (snap === undefined || snap === null) {
+          out.inboxSnapshot = snap === undefined ? 'undefined' : 'null'
+        } else if (typeof snap === 'object') {
+          out.inboxSnapshot = Array.isArray(snap['next-step'])
+            ? 'keys:' + Object.keys(snap).join(',')
+            : 'object(no next-step array)'
+          out.inboxNextStep = Array.isArray(snap['next-step']) ? snap['next-step'].length : 'absent'
+          out.inboxNextTurn = Array.isArray(snap['next-turn']) ? snap['next-turn'].length : 'absent'
+        } else {
+          out.inboxSnapshot = typeof snap
+        }
+        if (typeof projections?.seqOf === 'function') {
+          const seq = projections.seqOf(INBOX_KEY)
+          out.inboxSeq = typeof seq === 'number' ? seq : String(seq)
+        }
       } else {
         out.face = 'absent'
       }
@@ -207,14 +224,10 @@ export function queueDiag(session) {
       out.inboxSnapshot = `throw:${String(error && error.message ? error.message : error)}`
     }
     try {
-      if (typeof session.getSnapshot === 'function') {
-        const snap = session.getSnapshot()
-        out.snapshotQueue = Array.isArray(snap?.queue)
-          ? snap.queue.map(item => (item && typeof item.placement === 'string' ? item.placement : '?')).join(',')
-          : 'not-array'
-      }
-    } catch { out.snapshotQueue = 'throw' }
-    out.mirrorRows = (readQueueMirror(session) ?? []).length
+      const echoes = readPendingEchoes(session)
+      out.echoCount = echoes.length
+      out.echoTexts = echoes.map(e => `${String(e.time)}:${e.text.slice(0, 30)}`)
+    } catch { out.echoCount = 'throw' }
     out.projectionRows = (readInboxProjection(session) ?? []).length
   } catch { /* 诊断自身绝不影响主流程 */ }
   return out
@@ -318,7 +331,7 @@ export function bubbleTextOf(row, skipSelector = '[data-clock]') {
  * 不差的待发送消息虽然少见，但改错一条的代价是用户的消息被悄悄换掉，而这里是
  * 纯文本回匹、没有任何强锚点可依，宁可提示「定位不准」也不能猜。
  *
- * @param {{ nextTurn: unknown[], nextStep: unknown[] } | null} inbox normalizeInbox 的产物
+ * @param {unknown[] | null} inbox readInbox 的产物（next-step 的 user 行）
  * @param {string} bubbleText 气泡可见文本
  * @returns {{ ok: true, itemId: string, text: string, textOnly: boolean }
  *          | { ok: false, error: string }}
@@ -332,7 +345,7 @@ export function resolvePendingItem(inbox, bubbleText) {
   let exact = []
   // tier 1：折叠空白后匹配。
   let fuzzy = []
-  for (const row of inbox.nextStep) {
+  for (const row of inbox) {
     if (!isPendingUserRow(row)) continue
     const parts = contentText(rowContent(row))
     if (parts.text === raw && raw !== '') exact.push({ row, parts })

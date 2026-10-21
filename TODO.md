@@ -73,7 +73,7 @@
 | 4 | 关插件重启回归：`关闭插件.bat` → 重启 → 会话可开、伪造退原文 | ⬜ 待用户 | 再 `启用插件.bat` 验恢复 |
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审 |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词、tarball 钉 v3.1.0；README 中英双版已加收录注记 |
-| 7 | **v3.2.0 发布**（inbox 队列编辑 + 两个 bug 修复 + 双源读取修复） | 🔵 代码已合并（PR #1/#2 + 新 PR：真机「读不到队列」修复），本机待装新版，用户真机测试后发版 | 真机 bug：气泡可见但 `projections.faceOf('inbox')` 读不到（键未被 seed）→ 已改双源：`session.getSnapshot().queue`（UI 同源镜像）优先 + 投影兜底，另加 queueDiag 诊断；发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
+| 7 | **v3.2.0 发布**（inbox 队列编辑 + 三个 bug 修复） | 🔵 代码已合并（PR #1/#2/#4 + 新 PR：在途等待 + 长文本按钮），本机待装新版，用户真机测试后发版 | 真机 bug 二修：PR #4 的「`getSnapshot().queue` 镜像源」是**旧副本接口**（真实桌面端宿主 buildSnapshot 无 queue 字段）→ 已回退为 inbox 投影单一权威源（与宿主 UI `useProjection("inbox")` 逐字对齐）+ 新增在途检测：`getSnapshot().pendingSubmissions` 回显匹配即轮询等落库（200ms/6s），回显消失=入队失败快失败；另修拾取层：markdown 原始 HTML 的自定义元素/语义标签计入块级（长文本回复有按钮）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
 
 ## 不可破的规则（改代码前必读）
 

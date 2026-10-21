@@ -176,22 +176,17 @@ function makePendingBubble(text, clockText = '22:18') {
 /** next-step 里的一条 user 行（投影仓形状）。 */
 const queueRow = (id, text) => ({ id, content: [{ type: 'text', text }], source: { kind: 'user' } })
 
-/** 投影仓行 → 瞬态队列镜像行（宿主 SessionQueueMirror 的形状）。 */
-const mirrorRowOf = row => ({
-  id: row.id,
-  placement: row.source?.kind === 'user' ? 'steering' : 'context',
-  content: row.content,
-  text: row.content?.map(b => (b.type === 'text' ? b.text : '')).join('') ?? '',
-})
-
 /**
- * sessions 服务桩：binding 给一个带 inbox 投影、快照队列镜像与 updateQueue 的
- * session。镜像行由投影行派生——真机上宿主就是这么两边同步的。
+ * sessions 服务桩：binding 给一个带 inbox 投影与 updateQueue 的 session。
+ *
+ * 以**真实桌面端宿主**为准：getSnapshot() 没有 queue 字段（那是旧副本），
+ * pendingSubmissions 是本地回显。回显由 opts.echoes 给，默认空。
  */
 function makeSessions(rows, opts = {}) {
   const calls = []
+  const echoes = opts.echoes ?? []
   const session = {
-    getSnapshot: () => ({ queue: rows.map(mirrorRowOf) }),
+    getSnapshot: () => ({ pendingSubmissions: echoes.map(e => ({ ...e, placement: 'steering', time: 1 })) }),
     projections: {
       faceOf: key => ({
         getSnapshot: () => (key === 'inbox' ? { 'next-turn': [], 'next-step': rows } : undefined),
@@ -294,6 +289,58 @@ test('待发送气泡：定位失败（气泡不在队列里）→ 只说明原�
   const editor = bubble.querySelector('.rf3-editor')
   assert.ok(editor !== null, '仍要给出反馈卡片')
   assert.equal(editor.querySelector('textarea'), null, '定位不到就不给输入框')
+  assert.match(editor.textContent, /无法定位/)
+})
+
+test('待发送：投影空但本地回显在途 → 先等，落库后换成编辑器', async () => {
+  const { doc, win, flush, fetchImpl } = setup()
+  const bubble = makePendingBubble('在途消息')
+  doc.querySelector('[data-conversation-session]').append(bubble)
+  const calls = []
+  // 状态化会话桩：回显在途；测试翻旗后投影才有行（模拟宿主投影帧到达）。
+  let landed = false
+  const session = {
+    getSnapshot: () => ({
+      pendingSubmissions: landed
+        ? []
+        : [{ requestId: 'r1', placement: 'steering', time: 1, text: '在途消息', attachments: [] }],
+    }),
+    projections: {
+      faceOf: key => ({
+        getSnapshot: () => (key === 'inbox'
+          ? { 'next-turn': [], 'next-step': landed ? [queueRow('s1', '在途消息')] : [] }
+          : undefined),
+      }),
+    },
+    updateQueue: async (itemId, action) => { calls.push({ itemId, action }); return { ok: true, value: {} } },
+  }
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {}, sessions: { binding: () => ({ session }) } })
+  await tick(); flush()
+  btn(bubble, '改待发送').click()
+  await tick(); flush()
+  assert.match(
+    bubble.querySelector('.rf3-editor').textContent,
+    /正在进入队列/,
+    '在途时先给等待卡片，不能直接报「读不到」（2026-10-21 真机 bug）'
+  )
+  landed = true
+  await new Promise(resolve => setTimeout(resolve, 400))
+  await tick(); flush()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.ok(editor.querySelector('textarea') !== null, '落库后必须换成编辑器')
+  assert.equal(editor.querySelector('textarea').value, '在途消息')
+  btn(editor, '保存').click()
+  await tick()
+  assert.equal(calls.length, 1, '保存仍走官方 updateQueue')
+  assert.equal(calls[0].itemId, 's1', 'itemId 用投影行 id')
+})
+
+test('待发送：回显从未出现且投影空 → 判定无法定位，不进等待', async () => {
+  const { bubble } = await withPending('队列里没有这句话', [])
+  btn(bubble, '改待发送').click()
+  const editor = bubble.querySelector('.rf3-editor')
+  assert.equal(editor.querySelector('textarea'), null, '没有在途信号就不等')
   assert.match(editor.textContent, /无法定位/)
 })
 
@@ -1815,6 +1862,80 @@ test('豁免只给代码块外壳：别处的真按钮仍然整块拒绝', async
   await tick(); flush()
 
   assert.equal(md.hasAttribute('data-rf3-taken'), false, '代码块之外的交互控件仍然拒绝接管')
+})
+
+// ── G. 原始 HTML 自定义元素（真机 bug：长文本回复没有编辑入口）───────────
+//
+// 2026-10-21 真机（session-8adcb914-…）：一条被 <long_text_quote> 包住的
+// 长文本回复（梁神预设约定的输出格式）页面上没有「伪造」按钮。根因：宿主
+// markdown 渲染器把原始 HTML 自定义元素渲染成真 DOM 元素，消息正文容器的
+// 直接子元素全是它，一个 BLOCK_TAGS 都不沾 → 形状判定整体漏掉。
+// 宿主 UI 自身不用语义化 HTML5 标签、不用自定义元素（真机 bundle 核对），
+// 所以消息节点里出现它们只能是模型输出的原始 HTML——必须算块级内容。
+
+/** 造一条被自定义元素包住的长文本回复。 */
+function mkLongTextNode() {
+  const node = mk('div')
+  node.setAttribute('data-slot', 'conversation.chat.node')
+  const body = mk('div', 'body')
+  const md = mk('div', 'markdown')
+  const quote = mk('long-text-quote')
+  quote.append(mk('p', '', '梁神模式是对内置 Minimal 预设的扩展，并非又一个全能预设。'))
+  const ul = mk('ul')
+  const li = mk('li', '', '设计上最漂亮的一点：它承认提示词会失效。')
+  ul.append(li)
+  quote.append(ul)
+  md.append(quote)
+  body.append(md)
+  node.append(body)
+  return node
+}
+
+test('真机回归：自定义元素包住的长文本回复必须能接管', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+
+  const node = mkLongTextNode()
+  conv.append(node)
+  doc.body.append(conv)
+
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  const md = node.querySelector('.markdown')
+  assert.ok(md.hasAttribute('data-rf3-taken'), '自定义元素包住的正文必须被接管')
+  assert.ok(md.children.some(c => c.classList.contains('rf3-bar')), '必须挂上操作条')
+})
+
+test('语义化 HTML5 块级标签（section/figure/details）也来自原始 HTML，不得漏掉', async () => {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow()
+  const { fetchImpl } = makeFetch()
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+
+  const node = mk('div')
+  node.setAttribute('data-slot', 'conversation.chat.node')
+  const body = mk('div', 'body')
+  const md = mk('div', 'markdown')
+  const section = mk('section')
+  section.append(mk('h2', '', '设计取舍'))
+  section.append(mk('p', '', '分页必须在 wire 分割和 registry restrict 两处同时实施。'))
+  md.append(section)
+  body.append(md)
+  node.append(body)
+  conv.append(node)
+  doc.body.append(conv)
+
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+
+  assert.ok(md.hasAttribute('data-rf3-taken'), 'section 包住的正文必须被接管')
 })
 
 // 执行（异步：落盘链路要走 promise）
