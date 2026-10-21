@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-reply-forge-v3",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
   "description": "DSH 桌面端插件 v3：直接写活会话（message projection），改完立即被大模型采信，不用重启；也可显式只落盘（重启后生效）",
@@ -31,7 +31,7 @@
     "check": "node scripts/build-client.mjs --check",
     "lint": "node scripts/lint-flat.mjs",
     "build:esbuild": "node scripts/build-client-esbuild.mjs",
-    "release": "node scripts/build-release.mjs v3.1.0"
+    "release": "node scripts/build-release.mjs v3.2.0"
   },
   "license": "MIT",
   "repository": {

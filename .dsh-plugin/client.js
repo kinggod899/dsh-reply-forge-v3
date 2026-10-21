@@ -3890,7 +3890,7 @@ function apply(ctx) {
   // 两个插件同时装（--keep-v2）时同名会互相覆盖，排查时根本分不清是谁。
   try {
     window.__dshReplyForgeV3 = {
-      version: '3.1.0',
+      version: '3.2.0',
       sessionId() { return sessionId },
       /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
       domSessionId() { return currentSessionId(document) },

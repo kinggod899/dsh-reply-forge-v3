@@ -191,10 +191,11 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-共 **233 项 / 13 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
+共 **321 项 / 14 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
 `session-repair` 15 项）。其中 **21 项**（`projection` 13 + `persistence` 5 +
-`ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session`——找不到就 SKIP、不计失败，
-所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是完整 233 项全跑。
+`ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session`——找不到就 SKIP、不计失败
+（此态执行 300 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
+完整 321 项全跑。
 跑法：逐个 `node tests/<文件>`，或 `node --test "tests/*.test.mjs"` 看总门禁。改过
 `.dsh-plugin/client/*.mjs` 后必须重跑 `node scripts/build-client.mjs`（自研内联器，
 零依赖 / 无 JSX / 无 export default），`build.test.mjs` 会校验产物与源码一致。
@@ -240,6 +241,17 @@ node_modules，配置锚点放合并根——typert-loader 的 `createRequire` �
 
 ## 版本记录
 
+- **3.2.0** —— inbox 队列编辑上线 + 三处「按钮不见了」修复：
+  - *新功能*：AI 生成中途发的消息会排队（气泡形式挂在会话里），现在可以把鼠标移到
+    气泡上点「改待发送」直接改——不用撤、不用暂停 AI、不用重新打字；
+  - *真机 bug 四修*：「改待发送」点了报「读不到待发送队列」——真凶是读取代码把宿主的
+    方法从对象上摘下来再调用（测试环境能跑、真机上直接抛异常被吞掉），已改回正确
+    调用形式并补按宿主真实形状写的回归测试；
+  - *真机 bug 五修*：技术讨论里提到「工具调用」的长文本回复没有「伪造」按钮——
+    宿主根本不在正文里渲染工具调用（都是独立卡片），这类词汇匹配纯属误伤，分类器
+    已收缩到只认宿主费用页脚；
+  - *工程*：persistence 真宿主闭环首次在**真实桌面端宿主**（app.asar 提取）上验证
+    通过——此前对齐的是旧副本；测试 **321 项 / 14 套**（其中 21 项需本机宿主包）。
 - **3.1.0** —— 三条线：
   - *易用性*：修新会话真机 bug（新会话全程提示「没有可定位的助手正文」——在线空快照
     被当成终态缓存，永不重读）；写入方式改为可显式选择（自动 / 仅在线 / 仅落盘）。

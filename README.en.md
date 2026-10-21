@@ -12,7 +12,7 @@ check whether it took.
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
-[![tests](https://img.shields.io/badge/tests-233%20%2F%2013%20suites-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-321%20%2F%2014%20suites-brightgreen.svg)](#tests)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/kinggod899/dsh-reply-forge-v3)
 
 A plugin for the DSH desktop app (DeepSeek Harness). Every assistant message gets a
@@ -212,11 +212,12 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-**233 assertions in 13 suites** — including P0's `ignorable` (28), the real-host
+**321 assertions in 14 suites** — including P0's `ignorable` (28), the real-host
 persistence loop (5) and `session-repair` (15). **21 of them** (`projection` 13 +
 `persistence` 5 + `ignorable` 3) need the host package `@deepseek-ai/dsh-session`
 installed; without it they SKIP (not fail), so the release zip stays green on machines
-without DSH — with a host present, all 233 run. Or just run the gate:
+without DSH (300 assertions execute in that mode) — with a host present, all 321 run.
+Or just run the gate:
 
 ```bash
 node --test "tests/*.test.mjs"
@@ -266,6 +267,22 @@ otherwise blocks the host's lock-file cleanup).
 
 ## Version history
 
+- **3.2.0** — inbox queue editing ships, plus three "missing button" fixes:
+  - *New feature*: messages sent while the AI is mid-reply queue up as bubbles in the
+    conversation; hover one and hit "Edit queued" to rewrite it — no cancel, no pausing
+    the AI, no retyping;
+  - *Real-machine bug, fourth fix*: "Edit queued" failed with "can't read the send
+    queue" — the culprit was the read path detaching a host method from its object
+    before calling it (fine under test stubs, throws on the real host and gets
+    swallowed); restored the bound call and added a regression test shaped like the
+    real host class;
+  - *Real-machine bug, fifth fix*: long technical replies that merely *mention* "tool
+    calls" lost their Forge button — the host never renders tool-call blocks inside
+    message bodies (they're separate cards), so that vocabulary match was pure
+    collateral damage; the classifier now only matches the host's usage/fee footer;
+  - *Engineering*: the persistence real-host loop passed for the first time against
+    the **real desktop host** (extracted from app.asar) — earlier runs had aligned
+    with a stale copy; gate now **321 assertions / 14 suites** (21 need the host).
 - **3.1.0** — three tracks:
   - *Usability*: fixed the new-session stall ("no locatable assistant text" on every new
     session — the online empty snapshot was cached as terminal, never re-read); write mode
