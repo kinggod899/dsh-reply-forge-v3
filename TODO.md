@@ -7,8 +7,11 @@
 
 ## 当前状态（2026-10-21 复核）
 
-- 版本 `3.2.0` **已发布**（10-21，release id 419545336，https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.2.0）：
-  PR #1/#2/#4/#5/#6/#7/#8/#9 全部合并进 main，用户真机复验通过后打 tag 出版；
+- 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
+  https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
+  上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；**npm publish 待本机登录后执行**。
+  上一版 `3.2.0`（10-21，release id 419545336）：
+  PR #1/#2/#4/#5/#6/#7/#8/#9/#10/#11/#12 全部合并进 main；
   测试 **321 项 / 14 套**（10-21 实测：逐文件跑 14/14 全绿（`node --test` 按文件计），
   其中 3 套（persistence/projection 及 ignorable 的宿主项共 21 项）需本机宿主包，
   缺则 SKIP 不计失败（此态执行 300 项）；client 套件 81 项、queue 64 项，
@@ -80,6 +83,7 @@
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审；**v3.2.0 亦已上线**（release id 419545336，https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.2.0，zip + tgz 资产与 `node scripts/build-release.mjs v3.2.0` 输出字节级一致，fresh clone 终验通过——无宿主 300 项执行 + 2 套 SKIP，带宿主 321/14 全绿） |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词；**tarball 钉版已随 v3.2.0 发布更新**（v3.1.0 → v3.2.0，PR #8495 待合并，链接 200 验证通过）；README 中英双版已加收录注记 |
 | 7 | **v3.2.0 发布**（inbox 队列编辑 + 四个 bug 修复） | ✅ 已发布（10-21）：用户真机复验通过 → PR #8（persistence 真宿主兼容）/ #9（版本 bump + 文档定稿）合并 → tag v3.2.0 → GitHub release id 419545336（zip + tgz 资产字节级一致）→ fresh clone 终验通过 | 真机 bug 三修（PR #6）归因**错误**——「投影在气泡渲染后又变了（回合收走/React 慢半拍）」被新证据推翻：新诊断 `nextStepRows:"unreadable"`（readInboxRows 返回 null）与 `inboxNextStep:1`（queueDiag 绑定调用成功）出现在同一函数，唯一差异是绑定/未绑定 ⟹ 真凶 = `const faceOf = projections.faceOf; faceOf(INBOX_KEY)` 摘函数调用（宿主 ProjectionValueStore 是 class，faceOf 内部用 this；ES module 严格模式下 this=undefined → TypeError 被 try/catch 吞成 null）。测试桩全是箭头函数不碰 this，所以一直绿、真机必崩。修复=绑定调用 + 宿主形状 class 桩回归测试（`class HostProjectionStore`，断言绑定读得到 + 裸调必抛）。锚点复核/三路诚实失败/在途等待保留为有效加固（叙事不改错方向，改的是病根诊断）。分类器五修：ACTION_TEXT 从 20+ 条工具/文件/批准词汇收缩到仅 3 条费用页脚标记（asar 证据：ui-chat `case "tool-call": break;`——正文容器只渲染 text/reasoning/image/unknown，工具调用/批准是独立 node 带真按钮，ACTION_TAGS 结构检查已拦）——真机 3641 字技术分析（ session-8adcb914 消息#15）因含「工具调用」四字被拒，实跑从❌变✅。测试 queue 64 / client 81（带宿主 321 项 / 14 套）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
+| 8 | **v3.3.0 上 npm**（包名去 @local scope） | 🟡 GitHub release 已发（id 420101843）；npm publish 待本机 `npm login` 后执行 | 宿主「插件管理器」支持 npm 包名 / Git 仓库 / 本地目录三种来源，`dsh plugin --profile desktop add <pkg>` 本质转发 pnpm ⟹ 发 npm 是生态标准装法。改动：name `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`、删 `private`、加 `files` 白名单（`.dsh-plugin/index.mjs` + `client.js` + `server/` + `src/` + `cordis.patch.yml`，**必须含 src/ 因为 server/* 直接 import ../../src/*`）、`keywords`、`publishConfig.access=public`。包体积 69 文件/1.63 MB → **16 文件/86.3 KB**。install.mjs 加旧身份迁移（junction/dependencies/bundles/lockfile 四处清理，新增 `removeLockEntry` 认三种 key 写法）+ 反方向保护（node_modules 里是真实目录即 npm 装 → realpath 比对后不覆盖成 link）。本机已迁移完成（v1/v2 原样保留）。**npm 发布需本机 npm login（当前 ENEEDAUTH）** |
 
 ## 不可破的规则（改代码前必读）
 
