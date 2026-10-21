@@ -596,14 +596,25 @@ var __m_dsh_plugin_client_classify_mjs = (function(){
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const ACTION_TEXT = [
-  'tool-call', 'tool_call', 'toolResult', 'tool-result',
-  'function_call', 'functionCall',
-  '运行命令', '执行命令', '调用工具', '工具调用', '工具结果',
-  '写入文件', '修改文件', '创建文件', '删除文件', '读取文件',
-  '已应用补丁', '应用补丁',
-  'exit code', 'exitCode', 'stdout', 'stderr',
-  '等待授权', '需要确认',
   
   
   
@@ -1282,12 +1293,20 @@ function hasPendingEcho(session, bubbleText) {
 
 
 
+
+
+
+
+
+
+
+
 function readInboxProjection(session) {
   try {
     const projections = session === null || session === undefined ? undefined : session.projections
-    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
-    if (typeof faceOf !== 'function') return null
-    const face = faceOf(INBOX_KEY)
+    if (projections === null || projections === undefined) return null
+    if (typeof projections.faceOf !== 'function') return null
+    const face = projections.faceOf(INBOX_KEY)
     if (face === null || face === undefined) return null
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())
@@ -1324,12 +1343,13 @@ function readInbox(session) {
 
 
 
+
 function readInboxRows(session) {
   try {
     const projections = session === null || session === undefined ? undefined : session.projections
-    const faceOf = projections === null || projections === undefined ? undefined : projections.faceOf
-    if (typeof faceOf !== 'function') return null
-    const face = faceOf(INBOX_KEY)
+    if (projections === null || projections === undefined) return null
+    if (typeof projections.faceOf !== 'function') return null
+    const face = projections.faceOf(INBOX_KEY)
     if (face === null || face === undefined) return null
     if (typeof face.getSnapshot !== 'function') return null
     const normalized = normalizeInbox(face.getSnapshot())
