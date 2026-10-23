@@ -12,7 +12,7 @@ check whether it took.
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
-[![tests](https://img.shields.io/badge/tests-378%20%2F%2016%20suites-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-395%20%2F%2017%20suites-brightgreen.svg)](#tests)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/kinggod899/dsh-reply-forge-v3)
 
 A plugin for the DSH desktop app (DeepSeek Harness). Every assistant message gets a
@@ -241,15 +241,17 @@ node tests/session-log.test.mjs
 node tests/session-repair.test.mjs  # damaged-session repair tool
 node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
+node tests/verify-host.test.mjs  # the upgrade self-check itself (asar recipe / baseline compare / output parsing)
 ```
 
-**378 assertions in 16 suites** — including P0's `ignorable` (28), the real-host
-persistence loop (5), `session-repair` (15), v3.4's `lineage` (22) and v3.4.1's
-`migration-rename` (5). **29 of them** (`projection` 16 + `migration-rename` 5 +
+**395 assertions in 17 suites** — including P0's `ignorable` (28), the real-host
+persistence loop (5), `session-repair` (15), v3.4's `lineage` (22), v3.4.1's
+`migration-rename` (5) and the upgrade self-check's own `verify-host` (17).
+**29 of them** (`projection` 16 + `migration-rename` 5 +
 `persistence` 5 + `ignorable` 3) need the host package `@deepseek-ai/dsh-session`
 and its codec chain installed; without it they SKIP (not fail), so the release
-zip stays green on machines without DSH (349 assertions execute in that mode) — with a
-host present, all 378 run.
+zip stays green on machines without DSH (366 assertions execute in that mode) — with a
+host present, all 395 run.
 Or just run the gate:
 
 ```bash
@@ -261,6 +263,22 @@ After touching `.dsh-plugin/client/*.mjs` you must rebuild the artifact
 (`node scripts/build-client.mjs` — a self-written inliner, zero dependencies, no JSX, no
 export default); `build.test.mjs` asserts artifact and source stay byte-identical
 (`npm run check`).
+
+### Self-check after a DSH upgrade
+
+A host upgrade can **silently** change the interfaces this plugin depends on — that is
+exactly how v3.4's migration-rename bug slipped through (no error, no warning; forges
+quietly fell back to the original text). After upgrading DSH, run from the source tree:
+
+```bash
+npm run verify-host        # T0 version baseline + T1 contract surface (forces host-gated suites; no host = FAIL)
+node scripts/verify-host.mjs --boot   # + T2 boot smoke
+node scripts/verify-host.mjs --live   # + T3 live CDP
+```
+
+Version drift from the pinned `host-baseline.json` → WARN (usually harmless — just
+register the new baseline); any failed layer → FAIL with exit code 1. Full walkthrough
+in [使用说明.md](./使用说明.md) §7 (Chinese).
 
 Two extra guards and one alternative backend:
 
