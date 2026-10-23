@@ -438,7 +438,8 @@ DOM 桩模拟 disabled 当前焦点元素即掉焦，并有两条专项回归（
 
 ### 9.2 ① 升级自检（verify-host）设计
 
-> **✅ 已实施**（2026-10-23，分支 `feat/verify-host`，PR #16 待合并）：
+> **✅ 已实施**（2026-10-23，分支 `feat/verify-host`，PR #16 已合并，
+> merge commit `d6570e6`，分支已删）：
 > 下表「现成资产」与下文设计已全部落地为 `scripts/verify-host.mjs`，
 > 单测 `tests/verify-host.test.mjs` 17 项。相对设计的补全：
 > ① T1 契约检查细化为**十项**——含持久化闸门正负两面对照、读侧双类型
