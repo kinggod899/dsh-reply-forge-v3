@@ -18,8 +18,22 @@
   + routes +8 + client +5 + record +6。已知边界（文档已如实写明）：仅落盘写入
   的块无版本链（原稿在 `.bak-forge-*` 备份）；在线写落盘数百毫秒滞后。
   **发布（tag / GitHub release / npm）尚未做**——版本号已预提 3.4.0，
-  待用户确认后走发布循环。下一步候选：① 升级自检（verify-host 式宿主探针）
-  ③ 就地回溯（rewind）。
+  待用户确认后走发布循环。
+- **宿主漂移调研完成（10-23，PLAN.md §9，均未实施）**：本机真宿主已是
+  **0.2.1-rc.2**（PLAN 主体分析基于 0.2.0-rc.2）。三个新结论：
+  ①**v3→v4 迁移会把未知 ignorable 事件改名** `plugin:<type>`
+  （`dsh-session-format-v3-to-v4` 的 `namespaceV3OpaqueEvent`，
+  由 `dsh-session-persistence-jsonl` 在读 v3 世代文件时触发并写盘），
+  我们的 `reply-forge/patch` 将被改成 `plugin:reply-forge/patch` →
+  投影/血统/投影基准全部静默失配（本机只读扫描：57 个 patch 全在 v4
+  文件未被改名，v3 文件 0 个——风险潜在但真实）。修复=双类型接受
+  （读侧认两种类型、投影双注册、写侧不变），顺带成为 ① 的基线断言。
+  ②**① 升级自检**（verify-host）设计定稿：T0 版本基线 / T1 契约面
+  （含强制跑宿主依赖测试，缺宿主=FAIL）/ T2 boot 冒烟 / T3 活体 CDP。
+  ③**③ 就地回溯**（rewind）机制打通：宿主管道 `system/message` +
+  `surfaceOp:replace` + 空 content（不占 wire message）即可遮蔽区间；
+  持久化原生免 shim；**单向不可逆**；待实证第一问题=活体 UI 按
+  surface 还是 append-origin 渲染。建议顺序：9.1 修复 → ① → ③。
 - 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
   上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；
@@ -97,7 +111,10 @@
 | 5 | 发布：独立 v3 仓库 + release | ✅ 已上线（release id 415609796） | https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.1.0 ；标题/正文已补（name「dsh-reply-forge v3.1.0」+ 版本说明）；附件 zip + tgz 均为 tag 对应构建、与本地 `node scripts/build-release.mjs v3.1.0` 输出字节级一致（不在此处写死字节数，避免自指）；README 中文为主 + README.en.md 英文附加（用户拍板中文优先）；PR #7845 已投 awesome-dsh-plugin 待评审；**v3.2.0 亦已上线**（release id 419545336，https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.2.0，zip + tgz 资产与 `node scripts/build-release.mjs v3.2.0` 输出字节级一致，fresh clone 终验通过——无宿主 300 项执行 + 2 套 SKIP，带宿主 321/14 全绿） |
 | 6 | awesome-dsh-plugin 收录投稿 | ✅ 已过稿（PR #7845 合并，条目在列表 2285 行） | 条目 yml 已随 PR 提交并合并；硬条件已补齐：`dsh-plugin` 等 6 个 topic 经 API 设置、仓库满 24h、单条目、描述无营销词；**tarball 钉版已随 v3.2.0 发布更新**（v3.1.0 → v3.2.0，PR #8495 待合并，链接 200 验证通过）；README 中英双版已加收录注记 |
 | 7 | **v3.2.0 发布**（inbox 队列编辑 + 四个 bug 修复） | ✅ 已发布（10-21）：用户真机复验通过 → PR #8（persistence 真宿主兼容）/ #9（版本 bump + 文档定稿）合并 → tag v3.2.0 → GitHub release id 419545336（zip + tgz 资产字节级一致）→ fresh clone 终验通过 | 真机 bug 三修（PR #6）归因**错误**——「投影在气泡渲染后又变了（回合收走/React 慢半拍）」被新证据推翻：新诊断 `nextStepRows:"unreadable"`（readInboxRows 返回 null）与 `inboxNextStep:1`（queueDiag 绑定调用成功）出现在同一函数，唯一差异是绑定/未绑定 ⟹ 真凶 = `const faceOf = projections.faceOf; faceOf(INBOX_KEY)` 摘函数调用（宿主 ProjectionValueStore 是 class，faceOf 内部用 this；ES module 严格模式下 this=undefined → TypeError 被 try/catch 吞成 null）。测试桩全是箭头函数不碰 this，所以一直绿、真机必崩。修复=绑定调用 + 宿主形状 class 桩回归测试（`class HostProjectionStore`，断言绑定读得到 + 裸调必抛）。锚点复核/三路诚实失败/在途等待保留为有效加固（叙事不改错方向，改的是病根诊断）。分类器五修：ACTION_TEXT 从 20+ 条工具/文件/批准词汇收缩到仅 3 条费用页脚标记（asar 证据：ui-chat `case "tool-call": break;`——正文容器只渲染 text/reasoning/image/unknown，工具调用/批准是独立 node 带真按钮，ACTION_TAGS 结构检查已拦）——真机 3641 字技术分析（ session-8adcb914 消息#15）因含「工具调用」四字被拒，实跑从❌变✅。测试 queue 64 / client 81（带宿主 321 项 / 14 套）。发布循环：版本号 bump（package.json / release 脚本 / index.mjs 调试命名空间 / CHANGELOG 定日期）→ `build-release.mjs v3.2.0` → GitHub API 建 release + 传 zip/tgz 资产（正文用 CHANGELOG 用户版）→ fresh clone 终验；**不再 orphan 重写历史**，tag v3.1.0 保留作历史锚 |
-| 8 | **v3.3.0 上 npm**（包名去 @local scope） | 🟡 GitHub release 已发（id 420101843）；npm publish 待本机 `npm login` 后执行 | 宿主「插件管理器」支持 npm 包名 / Git 仓库 / 本地目录三种来源，`dsh plugin --profile desktop add <pkg>` 本质转发 pnpm ⟹ 发 npm 是生态标准装法。改动：name `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`、删 `private`、加 `files` 白名单（`.dsh-plugin/index.mjs` + `client.js` + `server/` + `src/` + `cordis.patch.yml`，**必须含 src/ 因为 server/* 直接 import ../../src/*`）、`keywords`、`publishConfig.access=public`。包体积 69 文件/1.63 MB → **16 文件/86.3 KB**。install.mjs 加旧身份迁移（junction/dependencies/bundles/lockfile 四处清理，新增 `removeLockEntry` 认三种 key 写法）+ 反方向保护（node_modules 里是真实目录即 npm 装 → realpath 比对后不覆盖成 link）。本机已迁移完成（v1/v2 原样保留）。**npm 发布需本机 npm login（当前 ENEEDAUTH）** |
+| 8 | **v3.3.0 上 npm**（包名去 @local scope） | ✅ 已完成（10-22 11:38 CST，registry 实证 dist-tags.latest=3.3.0，账号 end1949） | 宿主「插件管理器」支持 npm 包名 / Git 仓库 / 本地目录三种来源，`dsh plugin --profile desktop add <pkg>` 本质转发 pnpm ⟹ 发 npm 是生态标准装法。改动：name `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`、删 `private`、加 `files` 白名单（`.dsh-plugin/index.mjs` + `client.js` + `server/` + `src/` + `cordis.patch.yml`，**必须含 src/ 因为 server/* 直接 import ../../src/*`）、`keywords`、`publishConfig.access=public`。包体积 69 文件/1.63 MB → **16 文件/86.3 KB**。install.mjs 加旧身份迁移（junction/dependencies/bundles/lockfile 四处清理，新增 `removeLockEntry` 认三种 key 写法）+ 反方向保护（node_modules 里是真实目录即 npm 装 → realpath 比对后不覆盖成 link）。本机已迁移完成（v1/v2 原样保留） |
+| 9 | **v3→v4 迁移改名修复**（双类型接受，防静默失假） | 🟡 调研完成（PLAN §9.1），待实施 | 宿主 0.2.1-rc.2 的 v3→v4 迁移把未知 ignorable 事件改名 `plugin:<type>`，`reply-forge/patch` → `plugin:reply-forge/patch`，投影/血统/投影基准静默失配。修复：读侧双类型（`PATCH_EVENT_TYPES` + `isPatchEventType`，`projectedTextsOf`/`versionStackOf` 接受两种）、投影双注册、`OWN_EVENT_TYPES` 纳入两者；写侧不变；`poisonLines` 通用判定不用改。测试：单元级双类型行为一致 + 宿主门控真迁移回环。本机扫描：57 patch 全在 v4 未改名（潜在风险） |
+| 10 | **① 升级自检**（verify-host） | 🟡 设计定稿（PLAN §9.2），待实施 | `scripts/verify-host.mjs`：T0 版本基线比对（`host-baseline.json`）/ T1 契约面（含强制跑 21 项宿主依赖测试，缺宿主=FAIL）/ T2 boot 冒烟（host-oracle 配方）/ T3 活体 CDP（DOM 锚点 + 队列快照 + 活体渲染口径）。「DSH 升级后必跑」写进使用说明与 bat |
+| 11 | **③ 就地回溯**（rewind） | 🟡 机制调研完成（PLAN §9.3），待设计评审 | 宿主管道：`system/message` + `surfaceOp:replace` + 空 content（不占 wire message）+ `sourceEventSeqs` 密铺；持久化原生免 shim；单向不可逆；标记物建议 companion record（`reply-forge/rewind`）。待实证：活体 UI 按 surface 还是 append-origin 渲染（③ 设计阶段第一个实验） |
 
 ## 不可破的规则（改代码前必读）
 

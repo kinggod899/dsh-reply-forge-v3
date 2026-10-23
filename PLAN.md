@@ -363,3 +363,194 @@ DOM 桩模拟 disabled 当前焦点元素即掉焦，并有两条专项回归（
   开关一律走 bat + 重启，不碰这条路。
 - **已损坏的历史会话**：若日志里存在缺标记的 patch 事件，冷读会被拒。  
   用 `修复会话.bat`（退出 DSH 后）补标记，工具自带备份 / 原子写 / 复验 / 还原。
+
+---
+
+## 9. 下一步研究方向：① 升级自检 与 ③ 就地回溯（2026-10-23 源码级调研，均未实施）
+
+> 本节是调研记录，不是承诺。①②③ 来自对 `dsh-ctxedit` 的参考点提炼；
+> ②「版本血统」已作为 v3.4.0 交付（PR #14）。本节所有宿主断言来自本机
+> 真宿主提取树（`DSH_APP_ROOT`）的出货源码：DSH 桌面端运行时
+> **0.2.1-rc.2**（`dsh/desktop-runtime.json` 实证，`hostProtocolVersion=4`、
+> node 24.21.0、pnpm 11.28.5），`@deepseek-ai/dsh-session@0.2.1-rc.2`。
+
+### 9.1 先说事实：宿主已经漂了一次，而且带着一个潜在稳定性风险
+
+- 本文主体（§2-§7）的源码分析基于 `dsh-session@0.2.0-rc.2`；本机现装
+  **0.2.1-rc.2**。机制测试（21 项需宿主包的套件）一直对着提取树跑，
+  行为兼容性是**被测出来的**；但没有任何东西在宿主升级后**主动提醒**
+  「该重跑了」——本文的版本号此刻就是陈旧的。
+- 0.2.1 的包里出现了本文未涉及的 API 面：`appendPluginRecord(session,
+  type, data)` / `pluginRecordOf(event)` / `plugin:` 记录文法
+  （`/^plugin:[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/`），
+  自动带 `ignorable: true`。比现在的「`session.append` + shim 补标记」
+  更原生，但它要求插件运行时 import 宿主包（新耦合），且 doc 注明
+  「Only production source under `packages/experimental/` may call」。
+
+**v3→v4 迁移会把我们的事件改名（本次调研最重要的发现）**：
+
+- `@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js` 的
+  `namespaceV3OpaqueEvent`：迁移时把每条「未知类型 + `ignorable: true`」
+  的事件改名为 `plugin:<原类型>`。我们的 `reply-forge/patch` 正落在
+  这个集合里 → 变成 `plugin:reply-forge/patch`。
+- 迁移由 `dsh-session-persistence-jsonl` 接线：读取历史世代（v3）会话
+  文件时触发，staging 临时文件 + 摘要校验 + 原子替换，**写盘生成 v4
+  后继文件**。也就是说：**在旧宿主上伪造过的会话，被新宿主打开一次，
+  patch 事件就被永久改名**。
+- 后果链条（全部静默，无报错）：投影按 `reply-forge/patch` 注册 →
+  改名后 `planSurfaceEvent` 的 `projections.find(type)` 匹配不上 →
+  事件按「未知 ignorable」不透明跳过 → **伪造内容退回原文**；
+  `lineage.mjs` / `projectedTextsOf` 按类型匹配 → 版本链与投影基准
+  同时失效。这正是 §3 说的「不报错的最难查的一类问题」。
+- **本机实证（只读扫描，未动任何文件）**：69 个 v3 世代文件、265 个 v4；
+  patch 事件共 57 条，全部在 14 个 v4 文件里且**类型未被改名**；
+  v3 文件里 patch 事件为 0。即风险在本机是**潜在**的（没有历史遗留
+  失假会话），但对「在 v3 世代宿主上伪造过、升级后才打开」的用户是
+  现实存在的；且我们自己的落盘读（`session-log.mjs`）不做迁移，
+  与宿主观上的分歧会长期放大。
+
+**修复方案（小步、可测）——双类型接受**：
+
+- 读侧全部接受 `reply-forge/patch` 与 `plugin:reply-forge/patch`：
+  `src/patch-event.mjs` 新增 `PATCH_EVENT_TYPES` 集合 + `isPatchEventType()`
+  帮助函数，`projectedTextsOf`（落盘投影基准）改用它；
+  `src/lineage.mjs` 的 `versionStackOf` 同样接受；
+  `.dsh-plugin/server/patch.mjs` 为**两个类型各注册一个投影**
+  （宿主按类型去重，多类型互不干扰）；
+  `.dsh-plugin/server/ignorable.mjs` 的 `OWN_EVENT_TYPES` 纳入两者。
+- 写侧不变：新事件仍写 `reply-forge/patch`（live append 不改名，
+  只有 v3→v4 迁移改）。`src/session-repair.mjs` 的 `poisonLines` 按
+  「未知 + 缺 ignorable」通用判定，两种类型天然覆盖，**不用改**。
+- 回归测试：① 单元级——两种类型的事件在 `projectedTextsOf` /
+  `versionStackOf` / 投影上行为一致（无宿主也能跑）；② 宿主门控——
+  用宿主自己的 v3 codec 合成含 patch 事件的 v3 日志，跑真
+  `sessionFormatV3ToV4` 迁移，断言改名后投影/血统仍然解析
+  （`DSH_APP_ROOT` 缺失则 SKIP，与既有 21 项同规矩）。
+
+### 9.2 ① 升级自检（verify-host）设计
+
+**现成资产**（全部只读、不起写）：
+
+| 资产 | 能力 |
+|---|---|
+| `scripts/host-oracle.mjs` | 从真宿主 boot slim host + RPC `session/list`/`session/page` 端到端 |
+| `tests/host-pkg.mjs` | 宿主包三级解析（env → 逐级向上 → 已知安装位置 + 本地私有配置） |
+| `scripts/frame-anatomy.mjs` / `session-anatomy.mjs` | 真会话文件结构解剖（zstd 帧、事件分布） |
+| `scripts/probe-typert.mjs` | 导入宿主自己的校验器逐包体检（「用宿主的尺子量宿主」范式） |
+| `scripts/diag-focus.mjs` | 起真宿主 + 无头 Edge CDP 活体探针 |
+| `tests/_probe-admission.mjs` / `_probe-gate.mjs` | 宿主门控的准入/闸门探针 |
+
+**设计**：`scripts/verify-host.mjs`，分层探针，逐项 PASS/WARN/FAIL + 退出码：
+
+- **T0 定位与版本基线**：解析宿主安装（复用 host-pkg 三级解析）；
+  读 `desktop-runtime.json` 与 `dsh-session/package.json` 报版本；
+  与仓库内 `host-baseline.json`（发布时钉住的 known-good：版本 +
+  关键 API 形状 + 迁移行为，含 9.1 的改名断言）比对，不一致 → WARN。
+  附带校验 app.asar 可按既有配方提取（诊断工具自身的依赖）。
+- **T1 契约面**（import 提取树的宿主包，不起进程）：`Session.append`
+  接受 `surfaceOp`/`sourceEventSeqs`；`registerMessageProjection` 存在；
+  `KNOWN_SESSION_EVENT_TYPES` 仍含 `assistant/message`/`system/message`；
+  持久化闸门对「未知+无 ignorable」仍拒读（负面对照）；
+  `namespaceV3OpaqueEvent` 行为（我们的双类型接受的依据）；
+  存在性检查 `appendPluginRecord`/`pluginRecordOf`（存在 → 提示评估迁移）。
+  宿主依赖的测试套件（projection/persistence/ignorable 等 21 项）
+  在此层强制跑——**缺宿主 = FAIL 而不是 SKIP**（这正是 SKIP 机制
+  在发行包与开发机之间的语义差）。
+- **T2 boot 冒烟**（`--boot`，复用 host-oracle 配方）：slim host 起得来、
+  RPC 通、会话读得到。
+- **T3 活体**（`--live`，复用 diag-focus CDP）：`[data-composer-input]`
+  锚点、气泡 DOM 形态、`projections.faceOf('inbox').getSnapshot()` 形状、
+  **活体 UI 按 surface 还是 append-origin 渲染**（③ 的开放问题，见 9.4）。
+
+**用法**：`npm run verify-host`（T0+T1 默认；T2/T3 opt-in）；
+「DSH 升级后必跑」写进 `使用说明.md` 与 bat。
+**工作量/风险**：中（组装现有探针 + 基线清单）；零写风险（全部只读）。
+
+### 9.3 ③ 就地回溯（rewind）设计
+
+**用户效果**：在任意历史轮次上标记「从这里重新聊」——该点之后的轮次对
+**模型**即时收起（上下文卫生），完整记录仍在（界面可见、可翻），之后从
+标记点继续对话即生效。与 v3.4 血统的分工：血统管「一句话改错了怎么退」，
+回溯管「一大段聊偏了怎么重来」。
+
+**机制调研结论**（`dsh-session/lib/types/surface.js` + `dsh-agent-loop` 实证）：
+
+1. **遮蔽的原语是 `surfaceOp: replace`，不是投影**。投影
+   （`Map<seq, message>`）只能覆盖**已在 surface 上**的节点的消息，
+   增删不了节点；replace 才能把 `[startSeq, endSeq]` 区间从 surface 上
+   摘掉、换成新事件（`nodes.splice(startIdx, endIdx-startIdx+1, seq)`）。
+2. **插件侧可用的精确形状**（宿主自己的系统提示管理器用的就是这套，
+   `dsh-agent-loop` 的 `SystemPromptProjection.replace`）：
+   ```js
+   session.append('system/message', {
+     turn, step,
+     message: { id, role: 'system', content: [], source: { kind: 'system-prompt' } },
+   }, {
+     surfaceOp: { op: 'replace', startSeq, endSeq },
+     sourceEventSeqs: [...区间内每个当前 surface 节点],
+   })
+   ```
+   - `content: []` → `deriveEventMessage` 返回 null → **不占 wire message**，
+     但保留 surface 位置——天然的无痕标记（宿主管有 blanking 旧系统提示
+     同款用法）。注意非空 content 的 system 节点会在下次请求序列开始时
+     被宿主管机 blanking 掉，所以标记必须空 content。
+   - 硬约束（`surface.js` 实证）：`startSeq/endSeq` 必须是**当前**
+     surface 节点；`sourceEventSeqs` 必须密铺所有被遮蔽节点、无重复、
+     全部早于事件自身 seq；`assistant/message` 禁止带 `sourceEventSeqs`
+     （标记物只能用 system/developer/user 消息）；node 0 是系统提示时
+     只能被同类型单节点替换（**回溯点最早只能落在系统提示之后**）；
+     `assertMessageEventShape` 要求 system 消息 `source.kind ===
+     'system-prompt'` 且带非空 `id`。
+   - **持久化原生**：`system/message` 是已知类型，不需要 `ignorable`
+     shim、不碰现有写路径；重放时 fold 确定性重现同一遮蔽。这是相对
+     patch 事件（P0 shim）的稳定性优势。
+3. **单向性**：surface 词表里没有「取消遮蔽」——被 replace 摘掉的节点
+   不在 surface 上，后续 replace 的区间定位（`indexOf`）找不到它们。
+   **回溯不可逆**：被收起的轮次不能再进模型上下文（重新合成副本是
+   ctxedit 式的重路，不作为 v1）。UI 必须如实说明。
+4. **人的记录不受影响**：宿主历史/转录按 **append-origin 事件**构建
+   （`dsh-api-session-controller/lib/types/history.js` 的
+   `isAppendSurfaceEvent` 过滤实证）——被遮蔽的轮次在冷载界面照常可见。
+   「界面同步收起」是插件客户端的活（在 W 后注入回溯标记 + 折叠尾部，
+   沿用气泡文本回匹定位，不依赖 id 锚点）。
+5. **待实证的第一问题**：**活体 UI 到底按 surface 渲染还是按
+   append-origin 渲染**。冷载（history/page）已证实按 append-origin；
+   若直播按 surface，回溯发生的瞬间被遮蔽轮次会从当前界面消失、重启后
+   又回来——体验割裂，需要插件 UI 对冲。用 diag-focus 式 CDP 验证，
+   这是 ③ 设计阶段第一个实验（T3 探针的附带产出）。
+
+**三个设计决策点**（设计评审时拍板）：
+
+- **标记物形态**：(a) companion record——额外追加一条
+  `reply-forge/rewind`（ignorable，复用既有 shim 路径）携带
+  {watermark, shadowedSeqs, time, reason}，UI 纯推导自它；
+  (b) 无 companion——从「多节点 + 空 content 的 system replace」反推
+  （零新事件，但宿主自己的 blanking 也是同形状，靠「多节点/含非 system
+  节点」粗分辨，脆弱）。**建议 (a)**：消除歧义，且 shadow 事件本身
+  仍用宿主管道（system/message）。
+- **回溯与队列**：回溯不碰 inbox 队列；在途项照常在标记后作为新
+  user message 送达。产品层需决定「回溯时在途项如何处理」。
+- **与既有写路径的关系**：回溯是**新写杠杆**（首次让插件增删 surface
+  节点），必须过真实宿主回环测试（`tests/persistence.test.mjs` 同款
+  基建：真 SessionStore 上 append → 落盘 → 重读 → fold 验证遮蔽重现），
+  失败一律 `{ok:false, code}` 不抛；agent running 时锁入口（既有约定）。
+
+**风险清单**：形状错位可能「活体 append 过、重载 adopt 抛」
+（`assertMessageEventShape` 在恢复路径跑）——必须回环测试兜住；
+活体渲染口径未知（上文 #5）；不可逆的心理预期管理；shadow 后 forge
+编辑器不再能定位被遮蔽块（与「模型也看不见」一致，UI 明示）。
+
+### 9.4 ① vs ③ vs 9.1 修复：对比与建议
+
+| 维度 | 9.1 双类型修复 | ① 升级自检 | ③ 就地回溯 |
+|---|---|---|---|
+| 用户价值 | 防静默失假（稳定） | 间接（稳定保障） | 直接（上下文卫生） |
+| 机制可行性 | 高（类型集合 + 双投影注册） | 高（组装现有探针） | 中高（宿主原生 replace，形状与活体口径待实证） |
+| 工作量 | 小 | 中 | 中高 |
+| 风险 | 低（读侧扩容，写侧不动） | 零写风险 | 中（新写杠杆，需真宿主回环） |
+| 紧迫性 | **高**（静默失效类） | 中 | 低 |
+
+**建议顺序：9.1 修复 → ① → ③**。9.1 是把已发现的静默失效模式堵掉
+（顺带成为 ① 基线清单的第一条断言）；① 把全部宿主契约面（含 ③ 要用的
+`Session.append` surfaceOpts、`system/message` 形状、fold 重放、迁移
+改名行为）钉成可复跑的基线；③ 动工前先补 T3 活体渲染实验。
