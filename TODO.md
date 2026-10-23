@@ -30,10 +30,15 @@
   （读侧认两种类型、投影双注册、写侧不变），顺带成为 ① 的基线断言。
   ②**① 升级自检**（verify-host）设计定稿：T0 版本基线 / T1 契约面
   （含强制跑宿主依赖测试，缺宿主=FAIL）/ T2 boot 冒烟 / T3 活体 CDP。
-  ③**③ 就地回溯**（rewind）机制打通：宿主管道 `system/message` +
-  `surfaceOp:replace` + 空 content（不占 wire message）即可遮蔽区间；
-  持久化原生免 shim；**单向不可逆**；待实证第一问题=活体 UI 按
-  surface 还是 append-origin 渲染。建议顺序：9.1 修复 → ① → ③。
+  ③**③ 就地回溯**（rewind）机制打通后经用户评审**放弃**：宿主管道
+  `system/message` + `surfaceOp:replace` + 空 content（不占 wire message）
+  即可遮蔽区间，持久化原生免 shim，但**被宿主 `SessionStore.fork`
+  严格支配**（同模型效果；fork 有 parentSession/inheritedEventCount
+  显式血缘、双向第一等会话 vs 回溯单向不可逆、forked closers 兜未收尾
+  轮次、零新写杠杆）。用户原话：「和分支没什么区别，还比分支少了个
+  记录」——核查后成立。机制留档 PLAN §9.3，不再开发；残余选项=
+  逐消息「从这里分支」快捷键（调宿主 fork，非新机制）。
+  建议顺序：**双类型修复 → ① 升级自检**（③ 不为）。
 - 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
   上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；
@@ -114,7 +119,7 @@
 | 8 | **v3.3.0 上 npm**（包名去 @local scope） | ✅ 已完成（10-22 11:38 CST，registry 实证 dist-tags.latest=3.3.0，账号 end1949） | 宿主「插件管理器」支持 npm 包名 / Git 仓库 / 本地目录三种来源，`dsh plugin --profile desktop add <pkg>` 本质转发 pnpm ⟹ 发 npm 是生态标准装法。改动：name `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`、删 `private`、加 `files` 白名单（`.dsh-plugin/index.mjs` + `client.js` + `server/` + `src/` + `cordis.patch.yml`，**必须含 src/ 因为 server/* 直接 import ../../src/*`）、`keywords`、`publishConfig.access=public`。包体积 69 文件/1.63 MB → **16 文件/86.3 KB**。install.mjs 加旧身份迁移（junction/dependencies/bundles/lockfile 四处清理，新增 `removeLockEntry` 认三种 key 写法）+ 反方向保护（node_modules 里是真实目录即 npm 装 → realpath 比对后不覆盖成 link）。本机已迁移完成（v1/v2 原样保留） |
 | 9 | **v3→v4 迁移改名修复**（双类型接受，防静默失假） | 🟡 调研完成（PLAN §9.1），待实施 | 宿主 0.2.1-rc.2 的 v3→v4 迁移把未知 ignorable 事件改名 `plugin:<type>`，`reply-forge/patch` → `plugin:reply-forge/patch`，投影/血统/投影基准静默失配。修复：读侧双类型（`PATCH_EVENT_TYPES` + `isPatchEventType`，`projectedTextsOf`/`versionStackOf` 接受两种）、投影双注册、`OWN_EVENT_TYPES` 纳入两者；写侧不变；`poisonLines` 通用判定不用改。测试：单元级双类型行为一致 + 宿主门控真迁移回环。本机扫描：57 patch 全在 v4 未改名（潜在风险） |
 | 10 | **① 升级自检**（verify-host） | 🟡 设计定稿（PLAN §9.2），待实施 | `scripts/verify-host.mjs`：T0 版本基线比对（`host-baseline.json`）/ T1 契约面（含强制跑 21 项宿主依赖测试，缺宿主=FAIL）/ T2 boot 冒烟（host-oracle 配方）/ T3 活体 CDP（DOM 锚点 + 队列快照 + 活体渲染口径）。「DSH 升级后必跑」写进使用说明与 bat |
-| 11 | **③ 就地回溯**（rewind） | 🟡 机制调研完成（PLAN §9.3），待设计评审 | 宿主管道：`system/message` + `surfaceOp:replace` + 空 content（不占 wire message）+ `sourceEventSeqs` 密铺；持久化原生免 shim；单向不可逆；标记物建议 companion record（`reply-forge/rewind`）。待实证：活体 UI 按 surface 还是 append-origin 渲染（③ 设计阶段第一个实验） |
+| 11 | **③ 就地回溯**（rewind） | 🚫 已评估放弃（10-23 用户评审） | 机制已打通（system/message + surfaceOp:replace + 空 content，PLAN §9.3 留档），但被宿主 `SessionStore.fork(source, boundary)` **严格支配**：同模型效果、fork 有显式分支血缘（parentSession/inheritedEventCount）、双向第一等会话 vs 回溯单向不可逆、forked closers 处理未收尾轮次、零新写杠杆。残余选项另议：逐消息「从这里分支」快捷键（调宿主 fork，非新机制），先确认宿主界面是否已有按消息边界 fork 再定 |
 
 ## 不可破的规则（改代码前必读）
 
