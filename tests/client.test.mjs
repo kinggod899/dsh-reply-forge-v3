@@ -2147,6 +2147,121 @@ test('血统面板：定位不到时「历史版本」禁用（点了也读不�
   assert.equal(calls.some(c => c.url.includes('/session/lineage')), false, '禁用状态下不请求')
 })
 
+// ── F. 混合内容长回复（2026-10-23 真机）──────────────────────────────────
+//
+// 症状：一条 1450 字的回复点「伪造回复」，编辑器里只剩「不会」「线索」这种
+// 句中词；从上方目标下拉切回这条消息，内容完整了但写入「不生效」。
+//
+// 根因两条，都在「取正文」这一步：
+//  1. ownText 只遍历 el.children（元素子节点），段落里「正文 + <strong>加粗</strong>
+//     + 正文」的**直属文本被整段丢掉**，只剩行内元素与标题；
+//  2. 记录里存的是 markdown **源码**，页面是**渲染结果**，直接比字符串对不上，
+//     精确定位形同虚设 → 退化成「按顺序推断」→ 写入打到别的块上。
+// 这两条合起来正好解释「内容不全」+「改了不生效」。
+
+/** 造一条带混合内容的回复：段落里直属文本与 <strong> 交错。 */
+function setupRich({ blocks, mode = 'live' } = {}) {
+  const doc = createDocument()
+  const { window: win, flush } = createWindow({ pathname: '/s/test-session' })
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+  conv.setAttribute('data-conversation-session', 'test-session')
+  const node = mk('div')
+  node.setAttribute('data-slot', 'conversation.chat.node')
+  const body = mk('div', 'hWmORq_body')
+  const md = mk('div', '_markdown_kcgor_5')
+  const p1 = mk('p', '')
+  p1.append('这类内容', mk('strong', '', '不会'), '以公开网页的形式挂出来，而是通过付费订阅渠道私下分发。')
+  const h2 = mk('h2', '', '我把搜索当成一次踩点做了')
+  const p2 = mk('p', '')
+  p2.append('先看我搜到的原始线索——注意，它们只是', mk('strong', '', '线索'), '，不是成品。')
+  md.append(p1, h2, p2)
+  body.append(md)
+  node.append(body)
+  conv.append(node)
+  doc.body.append(conv)
+  const { calls, fetchImpl } = makeFetch({ blocks, mode })
+  return { doc, win, flush, md, calls, fetchImpl }
+}
+
+/** 上面那条回复在记录里的 markdown 源码（与页面渲染结果同一内容）。 */
+const RICH_MARKDOWN = '这类内容**不会**以公开网页的形式挂出来，而是通过付费订阅渠道私下分发。\n\n'
+  + '## 我把搜索当成一次踩点做了\n\n'
+  + '先看我搜到的原始线索——注意，它们只是**线索**，不是成品。'
+
+test('混合内容：编辑器初值是完整正文，不是加粗片段', async () => {
+  const { doc, win, flush, md, fetchImpl } = setupRich({
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: RICH_MARKDOWN }],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(md)
+  const area = editor.querySelectorAll('textarea')[0]
+  // 旧实现这里是 "不会 我把搜索当成一次踩点做了 线索"。
+  assert.ok(area.value.includes('这类内容'), '直属文本不能丢，实际：' + JSON.stringify(area.value))
+  assert.ok(area.value.includes('以公开网页的形式挂出来'), '直属文本不能丢')
+  assert.ok(area.value.includes('不是成品'), '末段的直属文本不能丢')
+})
+
+test('混合内容：记录是源码、页面是渲染结果，仍算精确匹配', async () => {
+  const { doc, win, flush, md, fetchImpl } = setupRich({
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: RICH_MARKDOWN }],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(md)
+  const notes = editor.querySelectorAll('.rf3-note').map(n => n.textContent).join('\n')
+  assert.ok(notes.includes('已定位到会话记录 seq=46'), '必须精确匹配，实际提示：\n' + notes)
+  assert.equal(notes.includes('按顺序推断'), false, '不能退化成顺序推断')
+})
+
+test('混合内容：精确定位后初值取记录原文（保住 markdown 格式）', async () => {
+  const { doc, win, flush, md, fetchImpl } = setupRich({
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: RICH_MARKDOWN }],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(md)
+  const area = editor.querySelectorAll('textarea')[0]
+  // 页面文本是拍平的（没有 ** 与 ##），用它会一保存就把格式全洗掉。
+  assert.equal(area.value, RICH_MARKDOWN, '初值必须是记录里的 markdown 原文')
+})
+
+test('混合内容：定位不到记录时初值仍是完整页面文本', async () => {
+  const { doc, win, flush, md, fetchImpl } = setupRich({ blocks: [] })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(md)
+  const area = editor.querySelectorAll('textarea')[0]
+  assert.ok(area.value.includes('这类内容'), '实际：' + JSON.stringify(area.value))
+  assert.ok(area.value.includes('我把搜索当成一次踩点做了'), '标题要保留')
+  assert.ok(area.value.includes('不是成品'), '末段要保留')
+})
+
+test('目标下拉选回自己这条：写入后页面立刻跟着变（不再当成外来消息）', async () => {
+  const { doc, win, flush, md, fetchImpl } = setupRich({
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: RICH_MARKDOWN }],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(md)
+  const sel = editor.querySelectorAll('.rf3-select')[0]
+  // 模拟用户「在上方筛选里切回这条长消息」：值不变，但确实触发了一次 change。
+  sel.value = '46:0'
+  sel.dispatch('change')
+  const area = editor.querySelectorAll('textarea')[0]
+  assert.equal(area.value, RICH_MARKDOWN, '选回自己这条也要拿到完整原文')
+  area.value = RICH_MARKDOWN + '\n\n（改过）'
+  forgeOnce(editor)
+  await tick(); flush(); await tick(); flush()
+  assert.ok(md.textContent.includes('（改过）'), '本机渲染必须跟着变，实际：' + md.textContent.slice(0, 80))
+})
+
 // 执行（异步：落盘链路要走 promise）
 let failed = 0
 for (const t of tests) {

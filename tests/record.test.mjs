@@ -11,7 +11,7 @@
 //
 // 运行：node tests/record.test.mjs
 import assert from 'node:assert/strict'
-import { domSignatureOf, recordNeedsRefresh, normalizeText } from '../.dsh-plugin/client/record.mjs'
+import { domSignatureOf, recordNeedsRefresh, normalizeText, matchBlocks } from '../.dsh-plugin/client/record.mjs'
 import { loadLineage, versionLabelOf, lineagePreview } from '../.dsh-plugin/client/lineage.mjs'
 
 const tests = []
@@ -116,6 +116,59 @@ test('读失败 → 重读（新会话「还没落盘」时就是这条，要能
 
 test('normalizeText：空白归一（签名与指纹共用）', () => {
   assert.equal(normalizeText(' 甲\n乙 '), '甲 乙')
+})
+
+// ── matchBlocks 的规范化口径（2026-10-23 真机）─────────────────────────────
+//
+// 记录里是 markdown 源码，页面 DOM 里是渲染结果。不带 canonical 直接比字符串，
+// 只要回复用了任何行内格式就永远对不上 → 精确匹配形同虚设 → 全部退化成
+// 「按顺序推断」，页面少渲染一条就整条链错位（长回复的写入打到别的块上）。
+
+test('matchBlocks：源码 vs 渲染结果直接比 → 只能退化成顺序推断（旧行为的病灶）', () => {
+  const out = matchBlocks([{ seq: 46, blockIndex: 0, kind: 'text', text: '这类内容**不会**挂出来' }], ['这类内容不会挂出来'])
+  assert.equal(out[0].exact, false, '不规范化时只能靠「末尾对齐」猜位置，不能标成精确匹配')
+})
+
+test('matchBlocks：给了 canonical → 源码与渲染结果算精确匹配', () => {
+  const strip = t => t.replace(/\*\*/g, '')
+  const out = matchBlocks([{ seq: 46, blockIndex: 0, kind: 'text', text: '这类内容**不会**挂出来' }], ['这类内容不会挂出来'], { canonical: strip })
+  assert.equal(out[0].seq, 46)
+  assert.equal(out[0].exact, true)
+})
+
+test('matchBlocks：canonical 渲染不出内容时退回源码比较（不能判成空串全等）', () => {
+  const same = matchBlocks([{ seq: 7, blockIndex: 0, kind: 'text', text: '原文在此' }], ['原文在此'], { canonical: () => '' })
+  assert.equal(same[0].seq, 7, '退回源码后仍应匹配')
+  assert.equal(same[0].exact, true)
+  const other = matchBlocks([{ seq: 7, blockIndex: 0, kind: 'text', text: '原文在此' }], ['别的内容'], { canonical: () => '' })
+  assert.equal(other[0].exact, false, '退回源码不等于「什么都能配上」')
+})
+
+test('matchBlocks：源码形态也入索引（思维链这类纯文本块不能被规范化误伤）', () => {
+  const strip = t => t.replace(/^- /gm, '')
+  const blocks = [{ seq: 3, blockIndex: 0, kind: 'reasoning', text: '- 先看用户诉求\n- 再看边界' }]
+  const out = matchBlocks(blocks, ['- 先看用户诉求 - 再看边界'], { canonical: strip })
+  assert.equal(out[0].seq, 3)
+  assert.equal(out[0].exact, true, '页面按纯文本渲染时，源码形态必须命中')
+})
+
+test('matchBlocks：同一个块不会被两个 DOM 块各认领一次', () => {
+  const strip = t => t.replace(/\*\*/g, '')
+  const blocks = [{ seq: 9, blockIndex: 0, kind: 'text', text: '**甲**' }]
+  const out = matchBlocks(blocks, ['甲', '甲'], { canonical: strip })
+  assert.equal(out[0].seq, 9)
+  assert.equal(out[1], null, '第二个「甲」没有对应的记录块，不能复用同一个 seq')
+})
+
+test('matchBlocks：规范化后同文本多条仍按出现顺序一一对应', () => {
+  const strip = t => t.replace(/\*\*/g, '')
+  const blocks = [
+    { seq: 1, blockIndex: 0, kind: 'text', text: '**甲**' },
+    { seq: 2, blockIndex: 0, kind: 'text', text: '甲' },
+  ]
+  const out = matchBlocks(blocks, ['甲', '甲'], { canonical: strip })
+  assert.deepEqual(out.map(m => m.seq), [1, 2])
+  assert.deepEqual(out.map(m => m.exact), [true, true])
 })
 
 // ── v3.4 血统访问层（client/lineage.mjs）────────────────────────────────────

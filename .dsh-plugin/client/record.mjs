@@ -164,12 +164,37 @@ export function recordNeedsRefresh(entry, domBlockCount, signature) {
 
 /**
  * 把 DOM 块与磁盘块配对。
+ *
+ * `options.canonical` 是「记录文本 → 可与页面文本直接比较的形态」的规范化
+ * 函数。落盘块里是 markdown **源码**，页面 DOM 里是**渲染结果**，两者只在
+ * 完全不带格式的回复上才碰巧相等；带 `**加粗**` / `## 标题` / 行内代码的
+ * 回复一律对不上，精确匹配形同虚设、全部退化成顺序推断（2026-10-23 真机：
+ * 长回复的写入打到了别的块上）。调用方（client/index.mjs）传入「用插件
+ * 自己的渲染器渲染一遍再取文本」的实现，两边就落在同一口径上。
+ * 不传时按原样比较——record.mjs 保持零 DOM 依赖，纯逻辑可单测。
+ *
+ * 两种形态**都**入索引（源码原文 + 渲染后文本），命中任一即算精确匹配。
+ * 只加渲染形态会误伤思维链这类纯文本块：宿主可能按纯文本渲染，源码里的
+ * `- ` / `#` 在页面上原样可见，规范化反倒把它们抹掉、从此对不上。
+ *
  * @param {Array<{seq:number|null,blockIndex:number,text:string}>} diskBlocks 只读路由给的落盘块
  * @param {string[]} domTexts 页面上按顺序的块文本
+ * @param {{canonical?: (text:string)=>string}} [options]
  * @returns {Array<{seq:number|null,blockIndex:number,text:string,exact:boolean}|null>}
  *   与 domTexts 等长；对不上的位置是 null。
  */
-export function matchBlocks(diskBlocks, domTexts) {
+export function matchBlocks(diskBlocks, domTexts, options = {}) {
+  const canonical = typeof options.canonical === 'function' ? options.canonical : null
+  /** 一个记录块可能匹配的键：源码原文，以及（可选）它的渲染后文本。 */
+  const keysOf = block => {
+    const raw = normalizeText(block.text)
+    if (canonical === null) return [raw]
+    const rendered = canonical(block.text)
+    // 规范化失败（渲染不出来）时只留源码键，别把整块当成空串。
+    if (rendered === '') return [raw]
+    const norm = normalizeText(rendered)
+    return norm === raw ? [raw] : [raw, norm]
+  }
   const out = domTexts.map(() => null)
   const used = new Set()
   const domNorm = domTexts.map(normalizeText)
@@ -177,9 +202,10 @@ export function matchBlocks(diskBlocks, domTexts) {
   // ── 1) 精确匹配：规范化后全等。同名多条按出现顺序一一对应。 ──────────────
   const byText = new Map()
   diskBlocks.forEach((b, i) => {
-    const key = normalizeText(b.text)
-    if (!byText.has(key)) byText.set(key, [])
-    byText.get(key).push(i)
+    for (const key of keysOf(b)) {
+      if (!byText.has(key)) byText.set(key, [])
+      byText.get(key).push(i)
+    }
   })
   domNorm.forEach((key, di) => {
     if (key === '') return
