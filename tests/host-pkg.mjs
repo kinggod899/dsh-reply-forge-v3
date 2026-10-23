@@ -131,6 +131,14 @@ export function findHostSessionPackage() {
   return findHostPackage('dsh-session')
 }
 
+/** 宿主安装根候选（env DSH_APP_ROOT → host-paths.local.json → 标准位置）。
+ *  与 findHostPackage 同一套 roots；供 scripts/verify-host.mjs 定位 app.asar
+ *  这类「提取前」资产用。只读，无副作用。 */
+export function knownInstallRoots() {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  return knownRoots(here)
+}
+
 /** 转成 ESM 能 import 的 file:// URL（Windows 下裸绝对路径会报 ERR_UNSUPPORTED_ESM_URL_SCHEME）。 */
 export function toFileUrl(p) {
   return new URL('file://' + (p.startsWith('/') ? '' : '/') + p.replace(/\\/g, '/')).href

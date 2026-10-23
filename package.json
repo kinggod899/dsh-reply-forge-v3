@@ -43,6 +43,7 @@
     "build": "node scripts/build-client.mjs",
     "check": "node scripts/build-client.mjs --check",
     "lint": "node scripts/lint-flat.mjs",
+    "verify-host": "node scripts/verify-host.mjs",
     "build:esbuild": "node scripts/build-client-esbuild.mjs",
     "release": "node scripts/build-release.mjs v3.4.0"
   },
