@@ -7,6 +7,19 @@
 
 ## 当前状态（2026-10-23 复核）
 
+- **BUG-6 长回复内容不全 / 改了不生效已修（10-23，分支 `fix/long-message-fragment`，
+  版本号 bump 3.4.1）**：真机症状是「1450 字回复点伪造只剩几个词」+
+  「从目标下拉切回该消息后写入不生效」。根因在取正文与定位两处：
+  ① `ownText` 只遍历 `children`（元素子节点），markdown 段落是混合内容
+  （`<p>正文<strong>粗</strong>正文</p>`），直属文本节点整段被丢；
+  ② 记录存 markdown 源码、页面是渲染结果，字符串直接比永远不等 → 精确匹配
+  形同虚设 → 全部退化成「末尾对齐推断」→ 页面与记录条数一错位就写错块。
+  修复四点：`ownText` 按文档顺序遍历（含文本节点，块级边界补空格、行内不补）；
+  `matchBlocks` 新增 `canonical` 选项（用插件渲染器把源码渲染后再比，源码形态
+  同时入索引以免误伤思维链）；精确命中时编辑器初值取记录原文（否则一保存就把
+  加粗/标题拍平）；目标下拉「选回自己这条」不再按外来目标处理。回归 **404 项 /
+  17 套全绿**（client 91 / record 31，+9）。
+
 - **v3.4.0 版本血统已合并**（10-23，PR #14，merge commit `2702b4d`，分支已删）：
   编辑器「历史版本」面板 + 「还原到此版」。零新事件字段 / 零写路径改动 /
   零投影改动：血统从已有事件**纯推导**（`src/lineage.mjs`：原稿在原始事件、
@@ -147,6 +160,7 @@
 | 8 | **v3.3.0 上 npm**（包名去 @local scope） | ✅ 已完成（10-22 11:38 CST，registry 实证 dist-tags.latest=3.3.0，账号 end1949） | 宿主「插件管理器」支持 npm 包名 / Git 仓库 / 本地目录三种来源，`dsh plugin --profile desktop add <pkg>` 本质转发 pnpm ⟹ 发 npm 是生态标准装法。改动：name `@local/dsh-reply-forge-v3` → `dsh-reply-forge-v3`、删 `private`、加 `files` 白名单（`.dsh-plugin/index.mjs` + `client.js` + `server/` + `src/` + `cordis.patch.yml`，**必须含 src/ 因为 server/* 直接 import ../../src/*`）、`keywords`、`publishConfig.access=public`。包体积 69 文件/1.63 MB → **16 文件/86.3 KB**。install.mjs 加旧身份迁移（junction/dependencies/bundles/lockfile 四处清理，新增 `removeLockEntry` 认三种 key 写法）+ 反方向保护（node_modules 里是真实目录即 npm 装 → realpath 比对后不覆盖成 link）。本机已迁移完成（v1/v2 原样保留） |
 | 9 | **v3→v4 迁移改名修复**（双类型接受，防静默失假） | ✅ 已实施（10-23，分支 `fix/patch-event-plugin-namespace`，随 v3.4.0 发布） | 宿主 0.2.1-rc.2 的 v3→v4 迁移把未知 ignorable 事件改名 `plugin:<type>`，`reply-forge/patch` → `plugin:reply-forge/patch`，投影/血统/投影基准静默失配。已修：读侧双类型（`PATCH_EVENT_TYPES` + `isPatchEventType`，`projectedTextsOf`/`versionStackOf` 接受两种）、投影双注册（`project` 共享）、`OWN_EVENT_TYPES` 纳入两者；写侧不变；`poisonLines` 通用判定不用改。测试 378/16 全绿，含真宿主迁移回环 5 项 |
 | 10 | **① 升级自检**（verify-host） | ✅ 已实施（10-23，分支 `feat/verify-host`，PR #16 已合并，merge commit `d6570e6`，分支已删，随 v3.4.0 发布） | `scripts/verify-host.mjs`：T0 版本基线比对（`host-baseline.json`：宿主三元组 + 8 包 + 契约期望值）/ T1 契约面十项 + 强制跑 4 个宿主门控套件（缺宿主=FAIL）/ T2 boot 冒烟（host-oracle 配方）/ T3 活体 CDP（委托 diag-focus）。`--extract` 从裸 asar（asar+unpacked 叠加）提取、`--json` 机器可读。「DSH 升级后必跑」写进 使用说明.md 第七节 + 安装插件.bat 末尾提示（npm 包装法不含 scripts/，该提示面向 zip 源码树） |
+| BUG-6 | 长回复点「伪造回复」内容不全；从目标下拉切回该消息后写入「不生效」 | ✅ 已修复（10-23，分支 `fix/long-message-fragment`，随 v3.4.1 发布） | 根因两条：① `ownText` 只遍历 `children`（元素子节点），混合段落 `<p>正文<strong>粗</strong>正文</p>` 的直属文本整段丢失 → 编辑器只剩加粗片段与标题；② 记录是 markdown 源码、页面是渲染结果，字符串直接比永远不等 → 精确定位失效、退化成顺序推断 → 写入打到别的块。修复：`ownText` 按文档顺序遍历含文本节点（块级边界补空格、行内不补）；`matchBlocks` 加 `canonical` 选项，用插件渲染器把源码渲染后再比（源码形态同时入索引，思维链不被误伤）；精确命中时编辑器初值取记录原文（防保存把格式拍平）；下拉「选回自己这条」不再算外来目标（本机渲染照常跟随）。回归 +9（client +5 / record +4），**404 项 / 17 套全绿** |
 | 11 | **③ 就地回溯**（rewind） | 🚫 已评估放弃（10-23 用户评审） | 机制已打通（system/message + surfaceOp:replace + 空 content，PLAN §9.3 留档），但被宿主 `SessionStore.fork(source, boundary)` **严格支配**：同模型效果、fork 有显式分支血缘（parentSession/inheritedEventCount）、双向第一等会话 vs 回溯单向不可逆、forked closers 处理未收尾轮次、零新写杠杆。残余选项另议：逐消息「从这里分支」快捷键（调宿主 fork，非新机制），先确认宿主界面是否已有按消息边界 fork 再定 |
 
 ## 不可破的规则（改代码前必读）
