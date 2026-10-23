@@ -7,7 +7,8 @@
 // 运行：node tests/patch.test.mjs
 import assert from 'node:assert/strict'
 import {
-  PATCH_EVENT_TYPE, PATCH_VERSION, applyPatch, buildPatchData, listBlocks, readBlock, validatePatchData,
+  PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN, PATCH_VERSION, applyPatch, buildPatchData,
+  isPatchEventType, listBlocks, projectedTextsOf, readBlock, validatePatchData,
 } from '../src/patch-event.mjs'
 
 const tests = []
@@ -31,6 +32,20 @@ function assistantMessage() {
 test('事件类型是自有命名空间，不与宿主类型撞名', () => {
   assert.equal(PATCH_EVENT_TYPE, 'reply-forge/patch')
   assert.equal(PATCH_VERSION, 1)
+})
+
+test('双类型接受：isPatchEventType 认迁移改名前后的两种类型', () => {
+  // v3→v4 迁移会把 reply-forge/patch 改名成 plugin:reply-forge/patch 写盘
+  // （宿主 namespaceV3OpaqueEvent，2026-10-23 实证）。读侧必须两种都认。
+  assert.equal(PATCH_EVENT_TYPE_PLUGIN, 'plugin:reply-forge/patch')
+  assert.equal(isPatchEventType(PATCH_EVENT_TYPE), true)
+  assert.equal(isPatchEventType(PATCH_EVENT_TYPE_PLUGIN), true)
+  assert.equal(isPatchEventType('assistant/message'), false)
+  assert.equal(isPatchEventType('reply-forge'), false, '差一截也不行')
+  assert.equal(isPatchEventType('plugin:reply-forge/patch/extra'), false, '精确匹配，不是前缀匹配')
+  assert.equal(isPatchEventType('plugin:reply-forge'), false, '少了段也不行')
+  assert.equal(isPatchEventType(undefined), false)
+  assert.equal(isPatchEventType(null), false)
 })
 
 test('readBlock：blockIndex 是 content 数组下标（含工具调用块）', () => {
@@ -157,6 +172,75 @@ test('applyPatch：thinking 别名块按 reasoning 处理', () => {
   assert.equal(applied, 1)
   assert.equal(message.content[0].text, '新')
   assert.equal('signature' in message.content[0], false)
+})
+
+// ── projectedTextsOf（落盘读取的投影基准；双类型接受是 2026-10-23 回归点）────
+// 这一层是「磁盘读到的原文」与「模型实际看到的投影后文本」对齐的唯一关卡，
+// 之前没有直接单测——双类型修复后补上，并把迁移类型钉成回归。
+
+/** 造一条 patch 事件（与真实落盘的事件同形：type/seq/time/data）。 */
+function patchEventOf(type, seq, targets) {
+  return { type, seq, time: 1, data: buildPatchData(targets) }
+}
+
+const tgt = (seq, blockIndex, kind, text) => ({ seq, blockIndex, kind, text })
+
+test('projectedTextsOf：旧类型照常归并，后写覆盖先写', () => {
+  const events = [
+    { type: 'assistant/message', seq: 1, data: {} },
+    patchEventOf(PATCH_EVENT_TYPE, 10, [tgt(1, 0, 'text', '第一版')]),
+    patchEventOf(PATCH_EVENT_TYPE, 11, [tgt(1, 0, 'text', '第二版')]),
+  ]
+  const texts = projectedTextsOf(events)
+  assert.equal(texts.get(1).get(0), '第二版')
+})
+
+test('projectedTextsOf：v3→v4 迁移改名后的 plugin: 类型同样归并（升级宿主后不失假）', () => {
+  // 修复前这里返回空 Map —— 落盘读取拿原文当基准，在线路径的陈旧校验与
+  // 伪造内容全部静默失配。这是本次修复的核心回归。
+  const events = [
+    { type: 'assistant/message', seq: 1, data: {} },
+    patchEventOf(PATCH_EVENT_TYPE_PLUGIN, 10, [tgt(1, 0, 'text', '伪造正文')]),
+  ]
+  const texts = projectedTextsOf(events)
+  assert.equal(texts.get(1).get(0), '伪造正文')
+})
+
+test('projectedTextsOf：新旧类型混合 → 按数组顺序叠加（与折叠顺序一致）', () => {
+  const events = [
+    patchEventOf(PATCH_EVENT_TYPE, 10, [tgt(1, 0, 'text', 'A')]),
+    patchEventOf(PATCH_EVENT_TYPE_PLUGIN, 11, [tgt(1, 0, 'text', 'B')]),
+    patchEventOf(PATCH_EVENT_TYPE, 12, [tgt(1, 0, 'text', 'C')]),
+  ]
+  assert.equal(projectedTextsOf(events).get(1).get(0), 'C')
+})
+
+test('projectedTextsOf：多个 (seq, blockIndex) 各自归并', () => {
+  const events = [
+    patchEventOf(PATCH_EVENT_TYPE_PLUGIN, 10, [
+      tgt(1, 0, 'text', '块零'),
+      tgt(2, 1, 'reasoning', '推理'),
+    ]),
+  ]
+  const texts = projectedTextsOf(events)
+  assert.equal(texts.get(1).get(0), '块零')
+  assert.equal(texts.get(2).get(1), '推理')
+  assert.equal(texts.get(1).get(1), undefined, '没被 patch 过的块不出现在 Map 里')
+})
+
+test('projectedTextsOf：非 patch 类型 / 坏数据 / 非数组输入 → 容坏跳过', () => {
+  const events = [
+    { type: 'assistant/message', seq: 1, data: {} },
+    { type: 'plugin:something-else', seq: 11, data: buildPatchData([tgt(1, 0, 'text', 'x')]) },
+    { type: PATCH_EVENT_TYPE, seq: 12, data: { version: 1, targets: 'bad' } },
+    { type: PATCH_EVENT_TYPE_PLUGIN, seq: 13, data: null },
+    null,
+    'not-an-object',
+  ]
+  assert.equal(projectedTextsOf(events).size, 0)
+  assert.deepEqual(projectedTextsOf(null), new Map())
+  assert.deepEqual(projectedTextsOf(undefined), new Map())
+  assert.deepEqual(projectedTextsOf('x'), new Map())
 })
 
 // ── 运行 ──────────────────────────────────────────────────────────────

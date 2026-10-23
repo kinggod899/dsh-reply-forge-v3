@@ -13,7 +13,7 @@
 //       DSH_SESSION_PKG=/path/to/dsh-session node tests/ignorable.test.mjs
 import assert from 'node:assert/strict'
 import { findHostPackage, findHostSessionPackage, toFileUrl } from './host-pkg.mjs'
-import { PATCH_EVENT_TYPE, buildPatchData } from '../src/patch-event.mjs'
+import { PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN, buildPatchData } from '../src/patch-event.mjs'
 import {
   APPEND_UNSAFE, WRITER_NOT_ROUTED, ensureIgnorableShim, ignorableShimState,
   installIgnorableShim, resetIgnorableShim, stampIgnorable, verifySessionWriter,
@@ -125,6 +125,19 @@ test('stampIgnorable：批里有非对象元素也不炸（宿主理论上不会
   assert.equal(out[0], null)
   assert.equal(out[2], 'x')
   assert.equal(out[1].ignorable, true)
+})
+
+test('stampIgnorable：迁移改名后的 plugin: 类型也补标记', () => {
+  // 改名发生在宿主读 v3 旧文件时（迁移写盘）。这种事件同样「不认识但属于我们」，
+  // 缺 ignorable 会让 v4 宿主下次读文件时整条拒掉——防御性地一并补上。
+  const migrated = {
+    type: PATCH_EVENT_TYPE_PLUGIN, seq: 9, time: 3,
+    data: buildPatchData([{ seq: 0, blockIndex: 0, kind: 'text', text: 'x' }]),
+  }
+  const out = stampIgnorable([migrated])
+  assert.equal(out[0].ignorable, true)
+  assert.equal(out[0].type, PATCH_EVENT_TYPE_PLUGIN, 'type 不变')
+  assert.equal(out[0].seq, 9, 'seq 不变')
 })
 
 // ── 2. 安装 ───────────────────────────────────────────────────────────

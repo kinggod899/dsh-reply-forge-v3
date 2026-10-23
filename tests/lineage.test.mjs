@@ -13,7 +13,7 @@
 // 运行：node tests/lineage.test.mjs
 import assert from 'node:assert/strict'
 import { versionStackOf, originalBlockOf } from '../src/lineage.mjs'
-import { buildPatchData, PATCH_EVENT_TYPE } from '../src/patch-event.mjs'
+import { buildPatchData, PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN } from '../src/patch-event.mjs'
 
 const tests = []
 function test(name, fn) { tests.push({ name, fn }) }
@@ -209,6 +209,45 @@ test('空文本也是合法一版（用户把回复抹空是刻意行为）', ()
   const stack = versionStackOf(events, 7, 0)
   assert.deepEqual(stack.versions.map(v => v.text), ['a', ''])
   assert.equal(stack.currentIndex, 1)
+})
+
+// ── 双类型接受（v3→v4 迁移改名，2026-10-23 回归点）────────────────────────
+
+test('迁移改名后的 plugin: patch 同样进版本链（不断头只剩原稿）', () => {
+  // 修复前 versionStackOf 死认旧类型：宿主升级迁移过的会话，版本链会在
+  // 迁移那一刻静默断头——历史版本里只剩原稿，用户看不到任何伪造记录。
+  const events = [
+    assistantEvent(7, [textBlock('原文')]),
+    { type: PATCH_EVENT_TYPE_PLUGIN, seq: 501, time: 1, data: buildPatchData([target(7, 0, 'text', '迁移后改的')]) },
+  ]
+  const stack = versionStackOf(events, 7, 0)
+  assert.equal(stack.ok, true)
+  assert.deepEqual(stack.versions.map(v => [v.source, v.text]), [['original', '原文'], ['patch', '迁移后改的']])
+  assert.equal(stack.versions[1].eventSeq, 501)
+  assert.equal(stack.currentIndex, 1)
+})
+
+test('新旧类型交替 → 同一条链按事件顺序堆叠（迁移前后写的 patch 不分裂）', () => {
+  const events = [
+    assistantEvent(7, [textBlock('原文')]),
+    patchEvent(0, [target(7, 0, 'text', 'A')]),          // 旧类型（迁移前写的）
+    { type: PATCH_EVENT_TYPE_PLUGIN, seq: 501, time: 1, data: buildPatchData([target(7, 0, 'text', 'B')]) }, // 新类型（迁移后写的）
+    patchEvent(2, [target(7, 0, 'text', 'C')]),          // 旧类型
+  ]
+  const stack = versionStackOf(events, 7, 0)
+  assert.deepEqual(stack.versions.map(v => v.text), ['原文', 'A', 'B', 'C'])
+  assert.equal(stack.currentIndex, 3)
+})
+
+test('迁移类型的坏数据同样容坏跳过，不牵连其余', () => {
+  const events = [
+    assistantEvent(7, [textBlock('a')]),
+    { type: PATCH_EVENT_TYPE_PLUGIN, seq: 501, time: 1, data: { version: 1, targets: 'not-an-array' } },
+    { type: PATCH_EVENT_TYPE_PLUGIN, seq: 502, time: 1, data: buildPatchData([target(7, 0, 'text', 'c')]) },
+  ]
+  const stack = versionStackOf(events, 7, 0)
+  assert.deepEqual(stack.versions.map(v => v.text), ['a', 'c'])
+  assert.equal(stack.versions[1].eventSeq, 502)
 })
 
 // ── 跑 ─────────────────────────────────────────────────────────────────────

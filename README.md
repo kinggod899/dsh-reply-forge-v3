@@ -167,6 +167,13 @@ dsh plugin --profile desktop add dsh-reply-forge-v3
   所以 v3 在写路径上包了 shim，进入宿主持久化前统一补标记
   （详见上面「关掉插件会不会把会话弄坏」）。
 
+**关于宿主升级（v3.4.0 起）**：宿主 0.2.1 在读 v3 世代的旧会话文件时会做格式迁移，
+把「未知类型 + `ignorable`」的事件改名成 `plugin:<原类型>` 写盘——我们的
+`reply-forge/patch` 会变成 `plugin:reply-forge/patch`。投影是按类型精确匹配的，
+所以本插件**两种类型都注册、读侧都接受**（`projectedTextsOf` 投影基准与版本血统
+推导同样双类型）；新事件仍写旧类型，不触发改名。升级过 DSH 的老用户，旧会话里的
+伪造与版本链都还在。
+
 完整论证、宿主源码证据、失败码表见 [PLAN.md](./PLAN.md)。
 
 ### 三条写入出口，按代价从小到大
@@ -217,6 +224,7 @@ node tests/ignorable.test.mjs    # P0：ignorable shim + 每会话写句柄核�
 node tests/live.test.mjs         # 在线层校验与失败码
 node tests/patch.test.mjs        # patch 纯数据层
 node tests/lineage.test.mjs      # 版本血统推导（v3.4）
+node tests/migration-rename.test.mjs  # v3→v4 迁移改名回归（真宿主 codec 回环）
 node tests/routes.test.mjs       # 路由层
 node tests/client.test.mjs       # 客户端产物
 node tests/record.test.mjs       # 记录过期判据（新会话卡死的根因）
@@ -227,11 +235,12 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-共 **360 项 / 15 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
-`session-repair` 15 项、v3.4 的 `lineage` 19 项）。其中 **21 项**（`projection` 13 +
-`persistence` 5 + `ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session`——找不到就 SKIP、不计失败
-（此态执行 339 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
-完整 360 项全跑。
+共 **378 项 / 16 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
+`session-repair` 15 项、v3.4 的 `lineage` 22 项、v3.4.1 的 `migration-rename` 5 项）。
+其中 **29 项**（`projection` 16 + `migration-rename` 5 + `persistence` 5 +
+`ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session` 及 codec 链——找不到就 SKIP、不计失败
+（此态执行 349 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
+完整 378 项全跑。
 跑法：逐个 `node tests/<文件>`，或 `node --test "tests/*.test.mjs"` 看总门禁。改过
 `.dsh-plugin/client/*.mjs` 后必须重跑 `node scripts/build-client.mjs`（自研内联器，
 零依赖 / 无 JSX / 无 export default），`build.test.mjs` 会校验产物与源码一致。

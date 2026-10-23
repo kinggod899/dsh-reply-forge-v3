@@ -409,23 +409,32 @@ DOM 桩模拟 disabled 当前焦点元素即掉焦，并有两条专项回归（
   现实存在的；且我们自己的落盘读（`session-log.mjs`）不做迁移，
   与宿主观上的分歧会长期放大。
 
-**修复方案（小步、可测）——双类型接受**：
+**修复方案（小步、可测）——双类型接受** ✅ **已落地（分支
+`fix/patch-event-plugin-namespace`，随 v3.4.0 发布）**：
 
 - 读侧全部接受 `reply-forge/patch` 与 `plugin:reply-forge/patch`：
   `src/patch-event.mjs` 新增 `PATCH_EVENT_TYPES` 集合 + `isPatchEventType()`
   帮助函数，`projectedTextsOf`（落盘投影基准）改用它；
   `src/lineage.mjs` 的 `versionStackOf` 同样接受；
   `.dsh-plugin/server/patch.mjs` 为**两个类型各注册一个投影**
-  （宿主按类型去重，多类型互不干扰）；
+  （宿主按类型去重，多类型互不干扰；`project` 提为模块级共享函数，
+  两份注册行为不可能漂移）；
   `.dsh-plugin/server/ignorable.mjs` 的 `OWN_EVENT_TYPES` 纳入两者。
 - 写侧不变：新事件仍写 `reply-forge/patch`（live append 不改名，
   只有 v3→v4 迁移改）。`src/session-repair.mjs` 的 `poisonLines` 按
   「未知 + 缺 ignorable」通用判定，两种类型天然覆盖，**不用改**。
-- 回归测试：① 单元级——两种类型的事件在 `projectedTextsOf` /
-  `versionStackOf` / 投影上行为一致（无宿主也能跑）；② 宿主门控——
-  用宿主自己的 v3 codec 合成含 patch 事件的 v3 日志，跑真
-  `sessionFormatV3ToV4` 迁移，断言改名后投影/血统仍然解析
-  （`DSH_APP_ROOT` 缺失则 SKIP，与既有 21 项同规矩）。
+- 回归测试（360 → 378 项 / 16 套，全绿）：
+  ① 单元级——两种类型的事件在 `projectedTextsOf` /
+  `versionStackOf` / 投影 / `stampIgnorable` 上行为一致（无宿主也能跑，
+  共 +13 项）；
+  ② 宿主门控——**`tests/migration-rename.test.mjs`（新，5 项）**：用宿主自己的
+  v3 codec 合成含 patch 事件的 v3 日志，经
+  `createSessionFormatCatalogWithChildren([]).createRestore(…)` 走**生产路径的
+  真迁移**（与持久化后端读历史文件同一条管线），断言改名实锤
+  （`reply-forge/patch` → `plugin:reply-forge/patch`，`ignorable` 与 data 不动）、
+  民警回环（迁移后事件流喂回真 `Session.fromRestore` 折叠，双投影下伪造仍在）、
+  修复前行为钉子（只注册旧类型 → 静默退回原文）、缺 ignorable → 整条日志被
+  迁移硬拒（shim 的存在理由）。`DSH_APP_ROOT` 缺失则 SKIP，与既有规矩一致。
 
 ### 9.2 ① 升级自检（verify-host）设计
 

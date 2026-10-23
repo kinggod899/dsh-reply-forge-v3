@@ -15,8 +15,8 @@
 //       DSH_SESSION_PKG=/path/to/dsh-session node tests/projection.test.mjs
 import assert from 'node:assert/strict'
 import { findHostSessionPackage, toFileUrl } from './host-pkg.mjs'
-import { PATCH_EVENT_TYPE, buildPatchData } from '../src/patch-event.mjs'
-import { patchProjection } from '../.dsh-plugin/server/patch.mjs'
+import { PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN, buildPatchData } from '../src/patch-event.mjs'
+import { patchProjection, patchProjections } from '../.dsh-plugin/server/patch.mjs'
 
 const tests = []
 function test(name, fn) { tests.push({ name, fn }) }
@@ -70,6 +70,32 @@ test('追加 patch 事件后，模型可见正文立即变成伪造内容', () =
 
   assert.equal(assistantMessage(session).content[1].text, '伪造正文')
   assert.equal(assistantMessage(session).content[0].text, '推理原文', '推理块不受影响')
+})
+
+test('双类型投影注册：两种事件类型各一个，project 函数同源', () => {
+  // v3→v4 迁移会把 reply-forge/patch 改名成 plugin:reply-forge/patch，
+  // 而宿主 projection 按事件类型精确匹配——漏注册新类型，迁移后的会话
+  // 伪造全部静默失效。两个投影必须共享同一个 project 函数（行为不漂移）。
+  assert.equal(patchProjections.length, 2)
+  assert.deepEqual(patchProjections.map(p => p.type), [PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN])
+  assert.equal(patchProjections[0].project, patchProjections[1].project, '同一函数引用，不是两份拷贝')
+  assert.equal(patchProjection.type, PATCH_EVENT_TYPE, '单数导出仍是旧类型（兼容旧调用方）')
+})
+
+test('迁移类型（plugin:reply-forge/patch）的事件直接追加也能驱动投影', () => {
+  const { session, assistantSeq } = makeSession(patchProjections)
+  session.append(PATCH_EVENT_TYPE_PLUGIN, buildPatchData([
+    { seq: assistantSeq, blockIndex: 1, kind: 'text', text: '伪造正文' },
+  ]))
+  assert.equal(assistantMessage(session).content[1].text, '伪造正文')
+  assert.equal(assistantMessage(session).content[0].text, '推理原文', '推理块不受影响')
+})
+
+test('迁移类型的事件同样不进 surface（不改变压缩/遮蔽关系）', () => {
+  const { session, assistantSeq } = makeSession(patchProjections)
+  const before = session.surface.nodes.slice()
+  session.append(PATCH_EVENT_TYPE_PLUGIN, buildPatchData([{ seq: assistantSeq, blockIndex: 1, kind: 'text', text: 'x' }]))
+  assert.deepEqual(session.surface.nodes, before, 'surface.nodes 必须一字不变')
 })
 
 test('patch 事件不进 surface（不改变压缩/遮蔽关系）', () => {

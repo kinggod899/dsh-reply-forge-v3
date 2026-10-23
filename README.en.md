@@ -12,7 +12,7 @@ check whether it took.
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
-[![tests](https://img.shields.io/badge/tests-360%20%2F%2015%20suites-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-378%20%2F%2016%20suites-brightgreen.svg)](#tests)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/kinggod899/dsh-reply-forge-v3)
 
 A plugin for the DSH desktop app (DeepSeek Harness). Every assistant message gets a
@@ -214,6 +214,15 @@ same-type projection rewrites the target message.
   that field, so v3 wraps the write handle with a shim that stamps it before the host
   persists (see "Will disabling the plugin corrupt my sessions?" above).
 
+**About host upgrades (since v3.4.0)**: when host 0.2.1 reads a v3-generation session
+file it runs a format migration that renames every "unknown type + `ignorable`" event to
+`plugin:<original type>` and writes it back — our `reply-forge/patch` becomes
+`plugin:reply-forge/patch`. Projections match event types exactly, so this plugin
+**registers and accepts both types** (the `projectedTextsOf` projection baseline and the
+version-lineage derivation likewise accept both); new events still use the old type,
+which never triggers the rename. Users who upgraded DSH keep their forges and version
+chains in old sessions.
+
 ## Tests
 
 ```bash
@@ -223,6 +232,7 @@ node tests/ignorable.test.mjs    # P0: ignorable shim + per-session write-handle
 node tests/live.test.mjs         # online layer validation and failure codes
 node tests/patch.test.mjs        # patch data layer
 node tests/lineage.test.mjs      # version-lineage derivation (v3.4)
+node tests/migration-rename.test.mjs  # v3→v4 migration-rename regression (real host codec loop)
 node tests/routes.test.mjs       # routing layer
 node tests/client.test.mjs       # client artifact
 node tests/record.test.mjs       # staleness heuristics (root cause of the new-session stall)
@@ -233,12 +243,13 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-**360 assertions in 15 suites** — including P0's `ignorable` (28), the real-host
-persistence loop (5), `session-repair` (15) and v3.4's `lineage` (19). **21 of them**
-(`projection` 13 + `persistence` 5 + `ignorable` 3) need the host package
-`@deepseek-ai/dsh-session` installed; without it they SKIP (not fail), so the release
-zip stays green on machines without DSH (339 assertions execute in that mode) — with a
-host present, all 360 run.
+**378 assertions in 16 suites** — including P0's `ignorable` (28), the real-host
+persistence loop (5), `session-repair` (15), v3.4's `lineage` (22) and v3.4.1's
+`migration-rename` (5). **29 of them** (`projection` 16 + `migration-rename` 5 +
+`persistence` 5 + `ignorable` 3) need the host package `@deepseek-ai/dsh-session`
+and its codec chain installed; without it they SKIP (not fail), so the release
+zip stays green on machines without DSH (349 assertions execute in that mode) — with a
+host present, all 378 run.
 Or just run the gate:
 
 ```bash
