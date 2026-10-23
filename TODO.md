@@ -7,7 +7,7 @@
 
 ## 当前状态（2026-10-23 复核）
 
-- **v3.4.0 开发中（10-23，分支 `feat/lineage-restore`）**：版本血统上线——
+- **v3.4.0 版本血统已合并**（10-23，PR #14，merge commit `2702b4d`，分支已删）：
   编辑器「历史版本」面板 + 「还原到此版」。零新事件字段 / 零写路径改动 /
   零投影改动：血统从已有事件**纯推导**（`src/lineage.mjs`：原稿在原始事件、
   patch 按事件顺序堆叠、连续重复塌缩），只在点开面板时算一次；还原 = 把旧版
@@ -17,7 +17,9 @@
   测试 **360 项 / 15 套**（本态执行 339，21 项需宿主包 SKIP）：新增 lineage 19
   + routes +8 + client +5 + record +6。已知边界（文档已如实写明）：仅落盘写入
   的块无版本链（原稿在 `.bak-forge-*` 备份）；在线写落盘数百毫秒滞后。
-  下一步候选：① 升级自检（verify-host 式宿主探针）③ 就地回溯（rewind）。
+  **发布（tag / GitHub release / npm）尚未做**——版本号已预提 3.4.0，
+  待用户确认后走发布循环。下一步候选：① 升级自检（verify-host 式宿主探针）
+  ③ 就地回溯（rewind）。
 - 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
   上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；**npm publish 待本机登录后执行**。
