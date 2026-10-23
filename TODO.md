@@ -22,7 +22,8 @@
   ③ 就地回溯（rewind）。
 - 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
-  上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；**npm publish 待本机登录后执行**。
+  上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；
+  **npm publish 10-22 11:38 CST 已成功**（registry 实证 dist-tags.latest=3.3.0，账号 end1949）。
   上一版 `3.2.0`（10-21，release id 419545336）：
   PR #1/#2/#4/#5/#6/#7/#8/#9/#10/#11/#12 全部合并进 main；
   测试 **321 项 / 14 套**（10-21 实测：逐文件跑 14/14 全绿（`node --test` 按文件计），
