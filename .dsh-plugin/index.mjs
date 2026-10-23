@@ -25,7 +25,7 @@
 // 产物 build-client.mjs 只处理浏览器 half）。
 
 import { registerRoutes } from './server/routes.mjs'
-import { patchProjection } from './server/patch.mjs'
+import { patchProjections } from './server/patch.mjs'
 import { installIgnorableShim } from './server/ignorable.mjs'
 
 export const name = 'dsh-reply-forge-v3'
@@ -35,12 +35,17 @@ export const name = 'dsh-reply-forge-v3'
 export const inject = ['webServer', 'sessions']
 
 export function apply(ctx) {
-  // 注册投影。宿主对同一事件类型只允许一个定义，重复注册会抛——用 try 兜住，
-  // 免得插件热重载时把整个 apply 打断（路由也就装不上了）。
-  try {
-    ctx?.sessions?.registerMessageProjection?.(patchProjection)
-  } catch {
-    // 已经注册过（热重载）或宿主不支持：都不影响落盘路径
+  // 注册投影（两种 patch 事件类型各一个：迁移改名前的 `reply-forge/patch` 与
+  // 改名后的 `plugin:reply-forge/patch`，见 server/patch.mjs 文件头）。
+  // 宿主对同一事件类型只允许一个定义，重复注册会抛——每个投影各自 try 兜住，
+  // 免得插件热重载时把整个 apply 打断（路由也就装不上了）。一个注册失败不
+  // 牵连另一个（旧宿主不认 plugin 类型时该次注册抛，正好被兜住）。
+  for (const projection of patchProjections) {
+    try {
+      ctx?.sessions?.registerMessageProjection?.(projection)
+    } catch {
+      // 已经注册过（热重载）或宿主不支持这个类型：都不影响落盘路径
+    }
   }
   // 装 ignorable shim（P0 安全闸门）。装不上不抛——在线写路由会自己拒绝，
   // 用户改用落盘写入即可，插件其余能力照常。

@@ -55,10 +55,16 @@
 // 为什么在这里而不在 src/ 下：这是**宿主适配**（依赖宿主的 tracker 结构），
 // src/ 是纯逻辑层，不该认识宿主。所以宿主侧适配全部收在本文件。
 
-import { PATCH_EVENT_TYPE } from '../../src/patch-event.mjs'
+import { PATCH_EVENT_TYPES } from '../../src/patch-event.mjs'
 
-/** 本插件写进会话日志的事件类型。只有这些会被补标记。 */
-const OWN_EVENT_TYPES = new Set([PATCH_EVENT_TYPE])
+/**
+ * 本插件写进会话日志的事件类型。只有这些会被补标记。
+ *
+ * 含 v3→v4 迁移改名后的 `plugin:reply-forge/patch`：宿主 0.2.1 读旧文件时
+ * 由迁移改写并写盘（PLAN §9.1），这种类型的事件同样是「我们的」，一样必须
+ * 带 ignorable——缺了它，v4 宿主下次读这个文件会被 fail-closed 闸门整条拒掉。
+ */
+const OWN_EVENT_TYPES = new Set(PATCH_EVENT_TYPES)
 
 /** 失败码：装不上 shim 时，在线写入必须被拒（而不是写坏会话）。 */
 export const APPEND_UNSAFE = 'APPEND_UNSAFE'

@@ -15,7 +15,7 @@
 // 它的「还原原样」依赖改写时写下的指针（0.5.1 之前没写，至今无法还原）；
 // 我们的原稿在原始事件里天然存在，从第一代伪造起就可回溯。
 
-import { PATCH_EVENT_TYPE, readBlock, validatePatchData } from './patch-event.mjs'
+import { isPatchEventType, readBlock, validatePatchData } from './patch-event.mjs'
 
 /**
  * 从原始事件里读一个块的可编辑视图。
@@ -51,6 +51,9 @@ export function originalBlockOf(events, seq, blockIndex) {
  *
  * 容坏与投影层保持一致：单条 patch 数据不合法（validatePatchData 抛）就跳过，
  * 不牵连其余；种类不符的 patch 跳过（宿主写入时就会拒，防御性保留）。
+ * 双类型接受（isPatchEventType）：v3→v4 迁移改名后的
+ * `plugin:reply-forge/patch` 同样是有效 patch 事件——漏掉它，升级过宿主的
+ * 用户版本链会在迁移那一刻静默断头（只剩原稿）。
  *
  * 连续重复塌缩：同一文本紧接着再 patch 一次是空操作（投影结果不变），
  * 不占一个版本位——否则「还原到此版」列表里会出现两版一字不差的条目。
@@ -73,7 +76,7 @@ export function versionStackOf(events, seq, blockIndex, kind = undefined) {
   if (Array.isArray(events) === true) {
     for (const ev of events) {
       if (ev === null || typeof ev !== 'object') continue
-      if (ev.type !== PATCH_EVENT_TYPE) continue
+      if (isPatchEventType(ev.type) === false) continue
       let data
       try { data = validatePatchData(ev.data) } catch { continue }
       for (const target of data.targets) {

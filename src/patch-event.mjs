@@ -19,8 +19,35 @@
 // 本文件是零依赖纯函数，宿主侧（projection / 路由）与测试共用同一份实现，
 // 避免「校验逻辑在两边漂移」——这正是本项目反复踩到的 bug 类型。
 
-/** 本插件自有的会话事件类型。 */
+/**
+ * 本插件自有的会话事件类型。
+ *
+ * 双类型接受的由来（2026-10-23 宿主漂移实证，PLAN §9.1）：
+ * 宿主 0.2.1（hostProtocolVersion=4）在读 **v3 世代**会话文件时会触发
+ * `dsh-session-format-v3-to-v4` 迁移，其中 `namespaceV3OpaqueEvent` 把
+ * 「未知类型 + `ignorable: true`」的事件改名为 `plugin:<原类型>` 并**写盘**
+ * （staging 临时文件 + 摘要校验 + 原子替换）。于是 0.2.0 时期写下的
+ * `reply-forge/patch` 在升级后变成 `plugin:reply-forge/patch`——读侧只认
+ * 旧类型的话，投影（按类型注册匹配）、血统推导、陈旧校验基准全部静默失配
+ * （伪造内容退回原文且不报错）。
+ *
+ * 策略：**读侧双类型接受，写侧不变**。live append 写的仍是旧类型——迁移改名
+ * 只发生在「读 v3 世代文件」这一条路径上，两种类型在各自宿主世代都是合法
+ * 可读的（旧类型靠我们自己的 `ignorable: true` 过 fail-closed 闸门，新类型
+ * 是 v4 的 plugin 记录文法）。
+ */
 export const PATCH_EVENT_TYPE = 'reply-forge/patch'
+
+/** v3→v4 迁移改名后的类型（宿主 0.2.1+ 读旧文件时由迁移写入）。 */
+export const PATCH_EVENT_TYPE_PLUGIN = 'plugin:reply-forge/patch'
+
+/** 本插件 patch 事件的全部合法类型（改名前后各一）。 */
+export const PATCH_EVENT_TYPES = new Set([PATCH_EVENT_TYPE, PATCH_EVENT_TYPE_PLUGIN])
+
+/** 判定一个事件类型是否是本插件的 patch 事件（迁移改名前后都算）。 */
+export function isPatchEventType(type) {
+  return PATCH_EVENT_TYPES.has(type)
+}
 
 /** patch 数据版本。形状变化时递增，旧版数据一律拒绝解释。 */
 export const PATCH_VERSION = 1
@@ -98,6 +125,10 @@ export function buildPatchData(targets) {
  * 投影后文本」不一致——写入时的陈旧校验拿旧文本当基准，会被在线路径的
  * STALE_TARGET 拒掉（真机 2026-10-17：seq=15 的块就是这么被拒的）。
  *
+ * 双类型接受：v3→v4 迁移会把 `reply-forge/patch` 改名成
+ * `plugin:reply-forge/patch` 写盘（见文件头），所以这里按 isPatchEventType
+ * 判定而不是死认旧类型——否则升级过宿主的用户，投影基准静默退回原文。
+ *
  * 容坏：单条 patch 数据不合法就跳过（validatePatchData 会抛），不牵连其余。
  *
  * @param {object[]} events readSessionEvents 的产物
@@ -108,7 +139,7 @@ export function projectedTextsOf(events) {
   if (Array.isArray(events) === false) return out
   for (const ev of events) {
     if (ev === null || typeof ev !== 'object') continue
-    if (ev.type !== PATCH_EVENT_TYPE) continue
+    if (isPatchEventType(ev.type) === false) continue
     let data
     try { data = validatePatchData(ev.data) } catch { continue }
     for (const target of data.targets) {
