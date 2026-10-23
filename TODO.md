@@ -5,8 +5,19 @@
 > [使用说明.md](./使用说明.md)，深度开发日志在
 > 开发期工作区记忆目录（不随仓库分发），项目级记忆在 `.workbuddy-ai/memory/`。
 
-## 当前状态（2026-10-21 复核）
+## 当前状态（2026-10-23 复核）
 
+- **v3.4.0 开发中（10-23，分支 `feat/lineage-restore`）**：版本血统上线——
+  编辑器「历史版本」面板 + 「还原到此版」。零新事件字段 / 零写路径改动 /
+  零投影改动：血统从已有事件**纯推导**（`src/lineage.mjs`：原稿在原始事件、
+  patch 按事件顺序堆叠、连续重复塌缩），只在点开面板时算一次；还原 = 把旧版
+  文本填回编辑器、走既有「写入伪造」（两步确认/陈旧校验/自动备份全复用）。
+  新增只读路由 `GET /api/reply-forge-v3/session/lineage`（sessionId 安全字符
+  校验 + seq/blockIndex 显式必填，防 Number(null)=0 悄悄变第 0 块）。
+  测试 **360 项 / 15 套**（本态执行 339，21 项需宿主包 SKIP）：新增 lineage 19
+  + routes +8 + client +5 + record +6。已知边界（文档已如实写明）：仅落盘写入
+  的块无版本链（原稿在 `.bak-forge-*` 备份）；在线写落盘数百毫秒滞后。
+  下一步候选：① 升级自检（verify-host 式宿主探针）③ 就地回溯（rewind）。
 - 版本 `3.3.0` **GitHub 侧已发布**（10-22，release id 420101843，
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.3.0）：
   上 npm（包名去 `@local` scope）+ files 白名单 + 旧安装自动迁移；**npm publish 待本机登录后执行**。
