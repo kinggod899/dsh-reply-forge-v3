@@ -24,6 +24,7 @@ import {
 } from '../../src/session-log.mjs'
 import { forgeSession } from '../../src/session-write.mjs'
 import { PATCH_EVENT_TYPE, projectedTextsOf } from '../../src/patch-event.mjs'
+import { versionStackOf } from '../../src/lineage.mjs'
 import { forgeLive, readLiveBlocks, sessionIsLive } from './live.mjs'
 
 /** 请求体上限：正文再长也不该超过这个量级。 */
@@ -131,6 +132,76 @@ export function registerRoutes(webServer, sessions) {
           blocks,
           patched,
           signatures: thinkingSignatureStats(events),
+        })
+      } catch (error) {
+        json(res, 500, { ok: false, error: String((error && error.message) || error) })
+      }
+    },
+  })
+
+  // ── 读：版本血统（v3.4，只读，按需）──────────────────────────────────
+  // 为什么单独一个路由而不是塞进 blocks 响应：blocks 是编辑器每次打开都会
+  // 拉的，血统要回传每个版本全文（可能很大），且只有点开「历史版本」才
+  // 需要——分开拉，热路径上一个字节都不多付。只读路由，不需要 x-rf3-forge
+  // 自定义头（与 blocks 同一条安全边界：sessionId 过安全字符校验）。
+  //
+  // 数据全部从落盘事件推导（src/lineage.mjs）：原稿在原始事件里、patch 链
+  // 按事件顺序堆叠。**不走 live**——活会话的事件遍历要碰宿主内部 API，
+  // 而磁盘副本就是持久化的同一份（在线写入最终同样落进 session.vN）。
+  // 已知代价：刚刚完成的在线写入落盘有约数百毫秒滞后，此刻读血统可能
+  // 差最后一版；UI 已在面板脚注如实说明。
+  webServer.register({
+    kind: 'exact',
+    path: '/api/reply-forge-v3/session/lineage',
+    handler: (req, res) => {
+      if (req.method !== 'GET') { json(res, 405, { ok: false, error: 'method-not-allowed' }); return }
+      const params = query(req)
+      if (params === null) { json(res, 400, { ok: false, error: 'bad request url' }); return }
+      const sessionId = params.get('sessionId') ?? ''
+      if (sessionId === '') { json(res, 400, { ok: false, error: 'sessionId required' }); return }
+      // seq/blockIndex 必须显式给出：Number(null) 是 0，缺参会悄悄变成
+      // 「第 0 块」这种看似合法的查询——参数校验漏一个，UI 就可能读到
+      // 别的块的血统还以为是这条的。
+      const seqRaw = params.get('seq')
+      const blockRaw = params.get('blockIndex')
+      if (seqRaw === null || seqRaw === '' || blockRaw === null || blockRaw === '') {
+        json(res, 400, { ok: false, error: 'seq and blockIndex required' }); return
+      }
+      const seq = Number(seqRaw)
+      const blockIndex = Number(blockRaw)
+      if (Number.isSafeInteger(seq) === false || seq < 0
+        || Number.isSafeInteger(blockIndex) === false || blockIndex < 0) {
+        json(res, 400, { ok: false, error: 'seq and blockIndex must be non-negative integers' }); return
+      }
+      const kind = normalizeKind(params.get('kind'))
+      if (kind === null) { json(res, 400, { ok: false, error: 'kind must be text or reasoning' }); return }
+
+      const file = findSessionFile(sessionsRootDefault(), sessionId)
+      if (file === null) { json(res, 404, { ok: false, error: 'session log not found' }); return }
+      try {
+        const events = readSessionEvents(file)
+        const stack = versionStackOf(events, seq, blockIndex, kind)
+        if (stack.ok !== true) {
+          // 业务失败一律 200 + ok:false + code：UI 要拿 code 出文案。
+          json(res, 200, {
+            ok: false,
+            code: stack.reason,
+            error: stack.reason === 'kind-mismatch'
+              ? '这个块的种类与请求不符（可能是思维链/正文选反了）'
+              : '会话记录里找不到这条回复的原始事件（会话可能被压缩改写掉）',
+          })
+          return
+        }
+        json(res, 200, {
+          ok: true,
+          mode: 'disk',
+          sessionId,
+          file: String(file),
+          seq,
+          blockIndex,
+          kind: stack.kind,
+          versions: stack.versions,
+          currentIndex: stack.currentIndex,
         })
       } catch (error) {
         json(res, 500, { ok: false, error: String((error && error.message) || error) })
