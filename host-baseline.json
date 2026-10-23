@@ -1,0 +1,36 @@
+{
+  "$schemaNote": "dsh-reply-forge-v3 的宿主 known-good 基线。scripts/verify-host.mjs 的 T0 拿真宿主与此处比对（不一致 → WARN，提示适配）；T1 契约面的期望值也以这里为准。宿主 DSH 升级后必跑 npm run verify-host，按输出决定是否适配。改这个文件 = 一次「新宿主版本已验证」的登记，应在 verify-host 全绿后随 PR 提交。",
+  "host": {
+    "version": "0.2.1-rc.2",
+    "hostProtocolVersion": 4,
+    "nodeVersion": "24.21.0"
+  },
+  "packages": {
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-format-v2-to-v3": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-app-boot": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-cmdline": "0.2.1-rc.2"
+  },
+  "contract": {
+    "knownEventTypesInclude": [
+      "assistant/message",
+      "system/message"
+    ],
+    "sessionStoreHasRegisterMessageProjection": true,
+    "sessionAppendAcceptsSurfaceOpOption": true,
+    "persistenceRejectsUnknownEventWithoutIgnorable": true,
+    "migrationRenamesOpaqueToPrefix": "plugin:",
+    "patchEventType": "reply-forge/patch",
+    "pluginRecordApiPresent": true
+  },
+  "hostGatedTestSuites": [
+    "projection",
+    "persistence",
+    "ignorable",
+    "migration-rename"
+  ]
+}

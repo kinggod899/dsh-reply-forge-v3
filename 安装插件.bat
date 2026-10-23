@@ -42,4 +42,7 @@ if not defined NODE (
 cmd /d /s /c "chcp 65001 >nul & "%NODE%" "%~dp0scripts\install.mjs" & chcp 936 >nul"
 echo.
 echo 完成后请重启 DSH 桌面端。
+echo.
+echo [提示] 升级 DSH 后，在本目录运行 node scripts\verify-host.mjs 可自检插件兼容性
+echo        （详见 使用说明.md 第七节；需要 Node.js）。
 pause
