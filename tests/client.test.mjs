@@ -60,7 +60,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
  *  记录变多——自动重读修复所依赖的场景）。
  *  forgeSequence：按调用顺序依次返回的写入结果（模拟 STALE 后重试成功）；
  *  用完后一直返回最后一个。 */
-function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, forgeSequence = null, readError = null, mode = 'disk', patched = [] } = {}) {
+function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, forgeSequence = null, readError = null, mode = 'disk', patched = [], lineage = null } = {}) {
   const calls = []
   let reads = 0
   let forges = 0
@@ -78,6 +78,11 @@ function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, forgeS
         status: 200,
         json: () => Promise.resolve({ ok: true, mode, patched, sessionId: 'test-session', file: '/tmp/x', total: serving.length, blocks: serving }),
       })
+    }
+    if (u.includes('/session/lineage')) {
+      // lineage 缺省回 ok:false，没配桩还被请求说明 UI 在不该请求时请求了。
+      const payload = lineage !== null ? lineage : { ok: false, error: 'lineage stub not configured' }
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(payload) })
     }
     if (u.includes('/session/forge')) {
       const payload = forgeSequence !== null
@@ -101,7 +106,7 @@ function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, forgeS
  */
 function setup({
   texts = [DEFAULT_TEXT], blocks = null, blocksLater = null, forgeResult = null, forgeSequence = null, confirmResult = true,
-  sessionAttr = 'test-session', pathname = '/s/test-session', readError = null, mode = 'disk', patched = [],
+  sessionAttr = 'test-session', pathname = '/s/test-session', readError = null, mode = 'disk', patched = [], lineage = null,
 } = {}) {
   const doc = createDocument()
   const storage = {}
@@ -119,7 +124,7 @@ function setup({
   const diskBlocks = blocks === null
     ? texts.map((t, i) => ({ seq: 100 + i * 10, blockIndex: 1, kind: 'text', text: t }))
     : blocks
-  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, blocksLater, forgeResult, forgeSequence, readError, mode, patched })
+  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, blocksLater, forgeResult, forgeSequence, readError, mode, patched, lineage })
   return { doc, win, pending, flush, conv, msgs, msg: msgs[0], storage, calls, fetchImpl, confirmCalls, dispatch }
 }
 
@@ -2035,6 +2040,111 @@ test('语义化 HTML5 块级标签（section/figure/details）也来自原始 HT
   await tick(); flush()
 
   assert.ok(md.hasAttribute('data-rf3-taken'), 'section 包住的正文必须被接管')
+})
+
+// ── H. v3.4：版本血统面板 ──────────────────────────────────────────────────
+// 三条设计红线，逐条盯：
+//   1. 「还原到此版」不引入第二条写路径——只填编辑器，真正写入仍走
+//      「写入伪造」（两步确认、陈旧校验、自动备份都由它把关）；
+//   2. 血统请求只在点击时发生（扫描/写入路径零新增请求）；
+//   3. 面板在编辑器内部（.rf3-editor 已被文本提取跳过），不污染气泡回匹。
+
+const LINEAGE_OK = {
+  ok: true,
+  kind: 'text',
+  currentIndex: 2,
+  versions: [
+    { index: 0, source: 'original', text: '最初的回复', eventSeq: null },
+    { index: 1, source: 'patch', text: '第一次改写', eventSeq: 51 },
+    { index: 2, source: 'patch', text: '第二次改写', eventSeq: 52 },
+  ],
+}
+
+test('血统面板：点「历史版本」才请求；三版齐全、当前版标记正确', async () => {
+  const { doc, win, flush, msg, fetchImpl, calls } = setup({ lineage: LINEAGE_OK })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  assert.equal(calls.some(c => c.url.includes('/session/lineage')), false, '没点就不该请求血统')
+  const editor = openEditor(msg)
+  btn(editor, '历史版本').click()
+  await tick(); flush()
+  const get = calls.find(c => c.url.includes('/session/lineage'))
+  assert.ok(get !== undefined, '点击后必须请求血统')
+  assert.ok(get.url.includes('seq=100'), '血统请求要带当前定位的 seq，实际：' + get.url)
+  const panel = editor.querySelector('.rf3-lineage')
+  assert.ok(panel !== undefined, '必须出现血统面板')
+  const badges = [...panel.querySelectorAll('.rf3-lineage-badge')].map(b => b.textContent)
+  assert.deepEqual(badges, ['原稿', 'v1', 'v2 · 当前'])
+  assert.equal(panel.querySelectorAll('.rf3-lineage-badge.is-current').length, 1, '只有一版带当前标记')
+  assert.ok(panel.textContent.includes('最初的回复'), '原稿预览要在')
+})
+
+test('血统面板：「还原到此版」只填编辑器，写入仍走「写入伪造」那条路', async () => {
+  const { doc, win, flush, msg, fetchImpl, calls } = setup({ lineage: LINEAGE_OK })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(msg)
+  btn(editor, '历史版本').click()
+  await tick(); flush()
+  const rowOf = label => [...editor.querySelectorAll('.rf3-lineage-row')]
+    .find(r => { const b = r.querySelector('.rf3-lineage-badge'); return b !== null && b.textContent === label })
+  const restoreBtn = rowOf('v1').querySelector('button')
+  restoreBtn.click()
+  assert.equal(editor.querySelector('textarea').value, '第一次改写', '填入的是该版全文')
+  assert.equal(calls.some(c => c.url.includes('/session/forge')), false, '还原到此版绝不直接写')
+  assert.equal(editor.querySelector('.rf3-lineage').style.display, 'none', '填入后面板收起')
+  // 走标准写入：两步确认后，写进去的正是那一版的文本
+  forgeOnce(editor)
+  await tick(); flush()
+  const body = JSON.parse(calls.find(c => c.url.includes('/session/forge')).init.body)
+  assert.equal(body.newText, '第一次改写', '还原的写入与普通伪造同一条路')
+  assert.equal(body.seq, 100)
+})
+
+test('血统面板：只有一版 → 明说「没有可回溯的版本」（含落盘写入的解释）', async () => {
+  const { doc, win, flush, msg, fetchImpl } = setup({
+    lineage: { ok: true, kind: 'text', currentIndex: 0, versions: [{ index: 0, source: 'original', text: '原文', eventSeq: null }] },
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(msg)
+  btn(editor, '历史版本').click()
+  await tick(); flush()
+  const panel = editor.querySelector('.rf3-lineage')
+  assert.ok(panel.textContent.includes('没有可回溯的版本'), '实际：' + panel.textContent)
+  assert.ok(panel.textContent.includes('.bak-forge-'), '必须解释落盘写入的原稿在备份里')
+  assert.equal(panel.querySelectorAll('button').length, 1, '只有「收起」，不给还原按钮')
+})
+
+test('血统面板：路由业务失败 → warn 提示带原因，不抛', async () => {
+  const { doc, win, flush, msg, fetchImpl } = setup({
+    lineage: { ok: false, error: '会话记录里找不到这条回复的原始事件（会话可能被压缩改写掉）', code: 'original-not-found' },
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(msg)
+  btn(editor, '历史版本').click()
+  await tick(); flush()
+  const panel = editor.querySelector('.rf3-lineage')
+  assert.ok(panel !== undefined, '必须出现血统面板')
+  const warn = panel.querySelector('.rf3-note-warn')
+  assert.ok(warn !== undefined && warn.textContent.includes('压缩改写'), '实际：' + (warn?.textContent ?? '无'))
+})
+
+test('血统面板：定位不到时「历史版本」禁用（点了也读不到）', async () => {
+  const { doc, win, flush, msg, fetchImpl, calls } = setup({ blocks: [] })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(msg)
+  assert.equal(btn(editor, '历史版本').disabled, true, 'match 为 null 时必须禁用')
+  btn(editor, '历史版本').click()
+  await tick(); flush()
+  assert.equal(calls.some(c => c.url.includes('/session/lineage')), false, '禁用状态下不请求')
 })
 
 // 执行（异步：落盘链路要走 promise）

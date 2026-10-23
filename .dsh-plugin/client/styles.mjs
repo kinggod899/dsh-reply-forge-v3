@@ -113,4 +113,35 @@ export const CSS = `
   content:'';width:5px;height:5px;border-radius:50%;
   background:#4caf7d;flex:0 0 auto;
 }
+
+/* 版本血统面板（v3.4）：只读展示 + 「填入编辑器」。
+   刻意不做成第二条写路径——还原等于写一条内容为该版本的伪造，
+   与「写入伪造」同一条路（两步确认、陈旧校验、自动备份都由它把关），
+   这里只负责把候选版本摆出来。虚线边框与编辑器主体区分：它是附属视图。 */
+.rf3-lineage{
+  display:flex;flex-direction:column;gap:6px;
+  padding:8px 10px;border-radius:8px;
+  border:1px dashed color-mix(in srgb, currentColor 28%, transparent);
+  background:color-mix(in srgb, currentColor 3%, transparent);
+  max-height:300px;overflow:auto;
+}
+.rf3-lineage-head{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.rf3-lineage-row{
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  padding:4px 0;border-top:1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+.rf3-lineage-row:first-of-type{border-top:none}
+.rf3-lineage-badge{
+  flex:0 0 auto;font-size:11px;line-height:1;padding:3px 7px;border-radius:999px;
+  border:1px solid color-mix(in srgb, currentColor 30%, transparent);opacity:.85;
+}
+.rf3-lineage-badge.is-current{
+  border-color:color-mix(in srgb, #4caf7d 60%, transparent);color:#4caf7d;opacity:1;
+}
+.rf3-lineage-text{
+  flex:1 1 100%;max-height:84px;overflow:auto;white-space:pre-wrap;word-break:break-all;
+  font-size:12px;line-height:1.5;opacity:.75;
+  padding:6px 8px;border-radius:6px;
+  background:color-mix(in srgb, currentColor 4%, transparent);
+}
 `
