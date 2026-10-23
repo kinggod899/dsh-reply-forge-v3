@@ -12,7 +12,7 @@ check whether it took.
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
-[![tests](https://img.shields.io/badge/tests-321%20%2F%2014%20suites-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-360%20%2F%2015%20suites-brightgreen.svg)](#tests)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](https://github.com/kinggod899/dsh-reply-forge-v3)
 
 A plugin for the DSH desktop app (DeepSeek Harness). Every assistant message gets a
@@ -48,9 +48,14 @@ prefixes) — just never all three at once, they share one message action bar:
 3. Rewrite, hit **Forge**. A confirmation spells out exactly what will happen; then it's
    done and visible.
 
+Already-forged blocks can be **taken back**: hit **History** in the editor to see the
+block's full version chain (original → every rewrite); pick an older version, hit
+**Restore this version** (fills the editor), then **Forge** once more. Thinking chains
+get the same chain.
+
 Two exits: **Render locally** (Ctrl+Enter — this page only, invisible to the model,
-reversible) and **Forge** (the model's copy — immediate online or on-reload via disk,
-**irreversible**). Full UI reference, the write-mode table and troubleshooting are in
+reversible) and **Forge** (the model's copy — immediate online or on-reload via disk).
+Full UI reference, the write-mode table and troubleshooting are in
 [使用说明.md](./使用说明.md) (Chinese docs; English docs are on the roadmap).
 
 ## See it in action
@@ -217,6 +222,7 @@ node tests/persistence.test.mjs  # P0: real-host persistence loop, create→appe
 node tests/ignorable.test.mjs    # P0: ignorable shim + per-session write-handle verification
 node tests/live.test.mjs         # online layer validation and failure codes
 node tests/patch.test.mjs        # patch data layer
+node tests/lineage.test.mjs      # version-lineage derivation (v3.4)
 node tests/routes.test.mjs       # routing layer
 node tests/client.test.mjs       # client artifact
 node tests/record.test.mjs       # staleness heuristics (root cause of the new-session stall)
@@ -227,11 +233,12 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-**321 assertions in 14 suites** — including P0's `ignorable` (28), the real-host
-persistence loop (5) and `session-repair` (15). **21 of them** (`projection` 13 +
-`persistence` 5 + `ignorable` 3) need the host package `@deepseek-ai/dsh-session`
-installed; without it they SKIP (not fail), so the release zip stays green on machines
-without DSH (300 assertions execute in that mode) — with a host present, all 321 run.
+**360 assertions in 15 suites** — including P0's `ignorable` (28), the real-host
+persistence loop (5), `session-repair` (15) and v3.4's `lineage` (19). **21 of them**
+(`projection` 13 + `persistence` 5 + `ignorable` 3) need the host package
+`@deepseek-ai/dsh-session` installed; without it they SKIP (not fail), so the release
+zip stays green on machines without DSH (339 assertions execute in that mode) — with a
+host present, all 360 run.
 Or just run the gate:
 
 ```bash

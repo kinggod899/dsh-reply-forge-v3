@@ -29,6 +29,7 @@ import {
   loadRecord, cachedRecord, resetCache, matchBlocks, normalizeText, forgeRecord,
   recordNeedsRefresh, domSignatureOf,
 } from './record.mjs'
+import { loadLineage, versionLabelOf, lineagePreview } from './lineage.mjs'
 import {
   readInbox, readInboxRows, resolvePendingItem,
   resolvePendingItemById, hasTextMatchRow, bubbleTextOf, submitQueueEdit, queueDiag,
@@ -1369,6 +1370,8 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
       matchNote.append(makeNote(doc, 'info', modeHint(modeRec, prefer)))
     }
     saveRecord.disabled = match === null
+    // 血统要按 seq+blockIndex 寻址，定位不到时按钮跟着禁用（而不是点了才报错）。
+    historyBtn.disabled = match === null
     renderTargets()
   }
 
@@ -1599,6 +1602,9 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   targetSel.addEventListener('change', () => {
     // 目标换了，之前那个「再次点击确认」不再算数——重新确认。
     confirmedForge = null
+    // 血统面板是按「这一个块」拉的，目标一换就是另一条消息的栈——
+    // 不关掉的话用户会把 seq=7 的历史填进 seq=9 的编辑器。
+    closeLineage()
     const value = String(targetSel.value ?? '')
     if (value === '') {
       // 回到「跟随页面上的这条」
@@ -1629,6 +1635,108 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
 
   targetRow.append(targetSel)
 
+  // ── 版本历史（v3.4）──────────────────────────────────────────────────────
+  // 只读面板 + 「填入编辑器」：刻意不引入第二条写路径——还原等于写一条
+  // 内容为该版本的伪造，与「写入伪造」同一条路（两步确认、陈旧校验、
+  // 自动备份都由它把关）。这里只把候选版本摆出来，让用户自己选。
+  //
+  // 性能纪律：只在点击时拉一次（loadLineage 无缓存），扫描 / 投影 / 写入
+  // 路径上一个字节都不多付；面板正文在编辑器内部（.rf3-editor 已被文本
+  // 提取跳过），不会污染气泡文本回匹。
+  const lineagePanel = doc.createElement('div')
+  lineagePanel.className = 'rf3-lineage'
+  lineagePanel.style.display = 'none'
+  let lineageBusy = false
+
+  const closeLineage = () => {
+    lineagePanel.textContent = ''
+    lineagePanel.style.display = 'none'
+  }
+
+  const historyBtn = makeButton(doc, '历史版本', '查看这个块的版本血统，可把旧版内容填入编辑器', () => {
+    if (match === null) {
+      status.textContent = '定位不到这条回复，读不到版本历史。'
+      return
+    }
+    if (lineageBusy === true) return
+    lineageBusy = true
+    historyBtn.disabled = true
+    status.textContent = '正在读取版本历史…'
+    lineagePanel.textContent = ''
+    lineagePanel.style.display = ''
+    lineagePanel.append(makeNote(doc, 'info', '⏳ 正在读取版本历史…'))
+    loadLineage(sessionId, match.seq, match.blockIndex, match.kind ?? 'text').then(res => {
+      lineageBusy = false
+      historyBtn.disabled = false
+      lineagePanel.textContent = ''
+      status.textContent = ''
+      if (res.ok !== true) {
+        const why = res.code === 'original-not-found'
+          ? '（会话记录里找不到这条回复的原始事件，会话可能被压缩改写掉）'
+          : res.code === 'kind-mismatch'
+            ? '（块的种类与请求不符，可能是思维链/正文选反了）'
+            : ''
+        lineagePanel.append(makeNote(doc, 'warn', '✖ 读取版本历史失败：' + (res.error || '未知错误') + why))
+        return
+      }
+      const head = doc.createElement('div')
+      head.className = 'rf3-lineage-head'
+      const headTitle = doc.createElement('span')
+      headTitle.className = 'rf3-hint'
+      headTitle.textContent = '版本血统 · seq=' + match.seq + ' 块' + match.blockIndex
+        + '（' + res.versions.length + ' 版，标「当前」的是模型此刻读到的）'
+      head.append(headTitle)
+      head.append(makeButton(doc, '收起', '收起版本面板', () => closeLineage()))
+      lineagePanel.append(head)
+      if (res.versions.length <= 1) {
+        // 两种「只有一版」混在一起说，别让用户以为功能坏了：
+        // 从未伪造；或此前走「仅落盘」写入——那条路原地改写记录文件，
+        // 不产生 patch 事件，血统天然看不见它（原稿在 .bak-forge-* 备份里）。
+        lineagePanel.append(makeNote(doc, 'hint',
+          '这个块没有可回溯的版本：可能从未伪造；也可能是此前用「仅落盘」写入的——'
+          + '那条路直接改写记录文件，原稿只在自动备份（.bak-forge-*）里。'))
+        return
+      }      for (const v of res.versions) {
+        const versionRow = doc.createElement('div')
+        versionRow.className = 'rf3-lineage-row'
+        const badge = doc.createElement('span')
+        badge.className = 'rf3-lineage-badge' + (v.index === res.currentIndex ? ' is-current' : '')
+        badge.textContent = versionLabelOf(v.index, res.currentIndex)
+        const meta = doc.createElement('span')
+        meta.className = 'rf3-hint'
+        meta.textContent = (v.source === 'original' ? '原始事件' : 'patch 事件 seq=' + v.eventSeq)
+          + ' · ' + String(v.text ?? '').length + ' 字'
+        const preview = doc.createElement('div')
+        preview.className = 'rf3-lineage-text'
+        preview.textContent = lineagePreview(v.text)
+        versionRow.append(badge, meta, preview)
+        if (v.index !== res.currentIndex) {
+          versionRow.append(makeButton(doc, '还原到此版', '把这版内容填入编辑器，点「写入伪造」后生效', () => {
+            area.value = String(v.text ?? '')
+            // 内容变了，两步确认的已确认指纹作废——必须重新确认才写。
+            confirmedForge = null
+            closeLineage()
+            status.textContent = '已填入' + versionLabelOf(v.index, res.currentIndex)
+              + '的内容；点「写入伪造」生效（需再次确认）'
+            try { area.focus() } catch { /* 忽略 */ }
+          }))
+        }
+        lineagePanel.append(versionRow)
+      }
+      const foot = doc.createElement('div')
+      foot.className = 'rf3-hint'
+      foot.textContent = '版本读取自会话记录文件（刚刚完成的在线写入落盘有数百毫秒滞后，可能差最新一版）；'
+        + '「还原到此版」只负责填入编辑器——真正写入仍走「写入伪造」，备份与确认都由它把关。'
+      lineagePanel.append(foot)
+    }).catch(error => {
+      lineageBusy = false
+      historyBtn.disabled = false
+      lineagePanel.textContent = ''
+      status.textContent = ''
+      lineagePanel.append(makeNote(doc, 'warn', '✖ 读取版本历史异常：' + String((error && error.message) || error)))
+    })
+  })
+
   // ── 写入方式（v3.1）──────────────────────────────────────────────────────
   // 两条路的前提差别很大（要不要重启、动不动磁盘），交给用户显式选。
   // 默认 auto：会话在内存里就立即生效，不在就落盘——对多数人这是对的。
@@ -1657,9 +1765,9 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   })
   targetRow.append(modeSel)
 
-  row.append(status, spacer, refresh, reset, cancel, saveLocal, saveRecord)
+  row.append(status, spacer, refresh, historyBtn, reset, cancel, saveLocal, saveRecord)
   renderMatch()
-  wrap.append(...head, targetRow, area, row)
+  wrap.append(...head, targetRow, area, lineagePanel, row)
 
   block.append(wrap)
   try { area.focus() } catch { /* 忽略 */ }
@@ -2095,7 +2203,7 @@ export function apply(ctx) {
   // 两个插件同时装（--keep-v2）时同名会互相覆盖，排查时根本分不清是谁。
   try {
     window.__dshReplyForgeV3 = {
-      version: '3.3.0',
+      version: '3.4.0',
       sessionId() { return sessionId },
       /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
       domSessionId() { return currentSessionId(document) },

@@ -13,6 +13,7 @@ import path from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { registerRoutes } from '../.dsh-plugin/server/routes.mjs'
 import { readSessionEvents } from '../src/session-log.mjs'
+import { buildPatchData, PATCH_EVENT_TYPE } from '../src/patch-event.mjs'
 import { installIgnorableShim, resetIgnorableShim } from '../.dsh-plugin/server/ignorable.mjs'
 
 // 普通在线路由用例模拟宿主里可安装的真实写句柄钩子；安全标记装不上时的
@@ -49,6 +50,7 @@ function installFakeIgnorableShim({ withWriter = true } = {}) {
 
 const READ_PATH = '/api/reply-forge-v3/session/blocks'
 const WRITE_PATH = '/api/reply-forge-v3/session/forge'
+const LINEAGE_PATH = '/api/reply-forge-v3/session/lineage'
 const SESSION_ID = 'rftest-0001'
 const TEXT_A = '这是第一条助手回复的正文，长度足够。'
 const TEXT_B = '这是第二条助手回复的正文，长度足够。'
@@ -132,6 +134,28 @@ function callRead(routes, { method = 'GET', query = '?sessionId=' + SESSION_ID }
   return { status: res.statusCode, body: parse(res) }
 }
 
+/** 调一次血统路由（同步，只读）。 */
+function callLineage(routes, { method = 'GET', query = '' } = {}) {
+  const res = makeRes()
+  routes[LINEAGE_PATH].handler(makeReq({ method, url: LINEAGE_PATH + query }), res)
+  return { status: res.statusCode, body: parse(res) }
+}
+
+/** 造一个带任意事件序列的临时会话（血统用例要预置 patch 事件）。 */
+function makeHomeWith(events) {
+  const home = mkdtempSync(path.join(tmpdir(), 'rf-routes-'))
+  const dir = path.join(home, 'sessions', '--proj--', 'session-' + SESSION_ID)
+  mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'session.v4.jsonl.zstd')
+  writeFileSync(file, sessionBytes(events))
+  return { home, file, dir }
+}
+
+/** 造一条 patch 事件（与真实在线写入同一条校验）。 */
+function patchEv(seq, targets) {
+  return { type: PATCH_EVENT_TYPE, seq, time: 1700000000000 + seq, data: buildPatchData(targets) }
+}
+
 /** 调一次写路由（body 会被同步 emit，promise 链需 await tick）。 */
 async function callWrite(routes, { method = 'POST', headers = { 'x-rf3-forge': '1' }, body = {} } = {}) {
   const res = makeRes()
@@ -198,6 +222,110 @@ test('读路由：目录穿越被挡死 → 404', () => {
 test('读路由：非 GET → 405', () => {
   const routes = mountRoutes()
   const r = callRead(routes, { method: 'POST' })
+  assert.equal(r.status, 405)
+})
+
+// ── 血统路由（v3.4）────────────────────────────────────────────────────────
+
+test('注册三条路由（读 + 写 + 血统）', () => {
+  const routes = mountRoutes()
+  assert.ok(routes[LINEAGE_PATH] !== undefined, '必须有血统路由')
+  assert.equal(routes[LINEAGE_PATH].kind, 'exact')
+})
+
+test('血统路由：未伪造的块 → 只有原稿一版', () => {
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A), assistantEvent(2, TEXT_B)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const r = callLineage(routes, { query: '?sessionId=' + SESSION_ID + '&seq=1&blockIndex=0' })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true)
+  assert.equal(r.body.versions.length, 1)
+  assert.equal(r.body.versions[0].source, 'original')
+  assert.equal(r.body.versions[0].text, TEXT_A)
+  assert.equal(r.body.currentIndex, 0)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：预置两条 patch → 三版，顺序与 currentIndex 正确', () => {
+  const { home } = makeHomeWith([
+    assistantEvent(1, TEXT_A),
+    patchEv(5, [{ seq: 1, blockIndex: 0, kind: 'text', text: '改一' }]),
+    patchEv(6, [{ seq: 1, blockIndex: 0, kind: 'text', text: '改二' }]),
+  ])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const r = callLineage(routes, { query: '?sessionId=' + SESSION_ID + '&seq=1&blockIndex=0' })
+  assert.equal(r.body.ok, true)
+  assert.deepEqual(r.body.versions.map(v => v.text), [TEXT_A, '改一', '改二'])
+  assert.deepEqual(r.body.versions.map(v => v.source), ['original', 'patch', 'patch'])
+  assert.deepEqual(r.body.versions.map(v => v.eventSeq), [null, 5, 6])
+  assert.equal(r.body.currentIndex, 2)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：走完一次写路由（落盘）后再读 → 仍只有一版（落盘是原地改写，原稿在备份里）', async () => {
+  // 这条锁死的是**如实行为**而不是 bug：v3.4  deliberately 不改写路径。
+  // 落盘写入（v2 原路）原地改原始事件、不产生 patch 事件，所以血统看不见它；
+  // 真原稿在 .bak-forge-* 备份里。想有血统，用自动/仅在线路径。
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A), assistantEvent(2, TEXT_B)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const w = await callWrite(routes, { body: { sessionId: SESSION_ID, seq: 1, blockIndex: 0, newText: '落盘改写', expectText: TEXT_A } })
+  assert.equal(w.body.ok, true)
+  const r = callLineage(routes, { query: '?sessionId=' + SESSION_ID + '&seq=1&blockIndex=0' })
+  assert.equal(r.body.ok, true)
+  assert.equal(r.body.versions.length, 1, '落盘写入不产生 patch 事件，血统只有一版')
+  assert.equal(r.body.versions[0].text, '落盘改写', '这一版就是磁盘当前文本')
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：缺 seq / blockIndex / 非数字 → 400（不能悄悄变成第 0 块）', () => {
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const base = '?sessionId=' + SESSION_ID
+  assert.equal(callLineage(routes, { query: base + '&blockIndex=0' }).status, 400)
+  assert.equal(callLineage(routes, { query: base + '&seq=1' }).status, 400)
+  assert.equal(callLineage(routes, { query: base + '&seq=abc&blockIndex=0' }).status, 400)
+  assert.equal(callLineage(routes, { query: base + '&seq=-1&blockIndex=0' }).status, 400)
+  assert.equal(callLineage(routes, { query: base + '&seq=1&blockIndex=0&kind=bogus' }).status, 400)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：会话不存在 → 404', () => {
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const r = callLineage(routes, { query: '?sessionId=nope-not-here&seq=1&blockIndex=0' })
+  assert.equal(r.status, 404)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：seq 不存在 → ok:false + original-not-found', () => {
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const r = callLineage(routes, { query: '?sessionId=' + SESSION_ID + '&seq=999&blockIndex=0' })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, false)
+  assert.equal(r.body.code, 'original-not-found')
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：kind 与原稿不符 → ok:false + kind-mismatch', () => {
+  const { home } = makeHomeWith([assistantEvent(1, TEXT_A)])
+  process.env.DSH_HOME = home
+  const routes = mountRoutes()
+  const r = callLineage(routes, { query: '?sessionId=' + SESSION_ID + '&seq=1&blockIndex=0&kind=reasoning' })
+  assert.equal(r.body.ok, false)
+  assert.equal(r.body.code, 'kind-mismatch')
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('血统路由：非 GET → 405', () => {
+  const routes = mountRoutes()
+  const r = callLineage(routes, { method: 'POST', query: '?sessionId=x&seq=1&blockIndex=0' })
   assert.equal(r.status, 405)
 })
 

@@ -38,6 +38,10 @@ v3 把 v2 的落盘改写包成了**兜底分支**：会话在内存里就直接
    选**写入方式**（默认「自动」）；
 3. 改文本，点**写入伪造**。写入前会弹一次确认（复述这次会怎么生效），写完成功立刻可见。
 
+改过的块还能**后悔**：点编辑器里的「**历史版本**」，能看到这个块的完整版本链
+（原稿 → 每一次改写），选中旧版「还原到此版」→ 内容填入编辑器 → 再点一次
+「写入伪造」即可。思维链同样有这条链。
+
 两个出口：**仅本机渲染**（Ctrl+Enter，只改这一页的样子、模型看不见、可逆）与
 **写入伪造**（改「模型看到的对话」，在线写活会话立即生效 / 落盘重启后生效，不可逆）。
 完整的界面说明、写入方式对照表、常见问题见 [使用说明.md](./使用说明.md)。
@@ -190,6 +194,20 @@ content: [...] })`。入口挂在带 `data-pending-steering` 的气泡上（回�
 错误码表逐个核对过宿主 `dsh-api-session-controller/lib/index.js` 的
 `updateQueue` handler（822-845 行），不是照抄别家插件。
 
+### 版本血统：为什么不给事件加「旧文本」字段
+
+「历史版本 / 还原到此版」（v3.4）刻意**不给 patch 事件加任何字段**——原稿本来
+就没被破坏（patch 是独立事件，原始 `assistant/message` 一字未动），每条 patch 又
+记着「改成什么」，投影折叠是「后者覆盖前者」；三者都在日志里，按事件顺序排起来
+就是完整版本链。所以血统是**纯推导**（`src/lineage.mjs`），只在用户点开面板时
+算一次——扫描、投影、写入路径上一个字节都没多付。「还原到此版」也不引入第二条
+写路径：它只把旧版文本填回编辑器，真正写入仍走「写入伪造」（两步确认、陈旧
+校验、自动备份全部复用）。
+
+代价说清：「**仅落盘**」写入的块没有版本链——那条路（v2 原路）原地改写记录
+文件，原稿只在 `.bak-forge-*` 备份里；在线写入落盘有数百毫秒滞后，此刻读链
+可能差最新一版。
+
 ## 测试
 
 ```bash
@@ -198,6 +216,7 @@ node tests/persistence.test.mjs  # P0 真宿主持久化闭环：create→append
 node tests/ignorable.test.mjs    # P0：ignorable shim + 每会话写句柄核验
 node tests/live.test.mjs         # 在线层校验与失败码
 node tests/patch.test.mjs        # patch 纯数据层
+node tests/lineage.test.mjs      # 版本血统推导（v3.4）
 node tests/routes.test.mjs       # 路由层
 node tests/client.test.mjs       # 客户端产物
 node tests/record.test.mjs       # 记录过期判据（新会话卡死的根因）
@@ -208,11 +227,11 @@ node tests/build.test.mjs
 node tests/session-anatomy.test.mjs
 ```
 
-共 **321 项 / 14 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
-`session-repair` 15 项）。其中 **21 项**（`projection` 13 + `persistence` 5 +
-`ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session`——找不到就 SKIP、不计失败
-（此态执行 300 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
-完整 321 项全跑。
+共 **360 项 / 15 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
+`session-repair` 15 项、v3.4 的 `lineage` 19 项）。其中 **21 项**（`projection` 13 +
+`persistence` 5 + `ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session`——找不到就 SKIP、不计失败
+（此态执行 339 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
+完整 360 项全跑。
 跑法：逐个 `node tests/<文件>`，或 `node --test "tests/*.test.mjs"` 看总门禁。改过
 `.dsh-plugin/client/*.mjs` 后必须重跑 `node scripts/build-client.mjs`（自研内联器，
 零依赖 / 无 JSX / 无 export default），`build.test.mjs` 会校验产物与源码一致。

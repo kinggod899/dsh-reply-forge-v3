@@ -12,6 +12,7 @@
 // 运行：node tests/record.test.mjs
 import assert from 'node:assert/strict'
 import { domSignatureOf, recordNeedsRefresh, normalizeText } from '../.dsh-plugin/client/record.mjs'
+import { loadLineage, versionLabelOf, lineagePreview } from '../.dsh-plugin/client/lineage.mjs'
 
 const tests = []
 function test(name, fn) { tests.push({ name, fn }) }
@@ -117,12 +118,80 @@ test('normalizeText：空白归一（签名与指纹共用）', () => {
   assert.equal(normalizeText(' 甲\n乙 '), '甲 乙')
 })
 
+// ── v3.4 血统访问层（client/lineage.mjs）────────────────────────────────────
+
+test('versionLabelOf：原稿 / vN / 当前标记', () => {
+  assert.equal(versionLabelOf(0, 0), '原稿 · 当前')
+  assert.equal(versionLabelOf(0, 2), '原稿')
+  assert.equal(versionLabelOf(1, 2), 'v1')
+  assert.equal(versionLabelOf(2, 2), 'v2 · 当前')
+})
+
+test('lineagePreview：压平空白 + 截断', () => {
+  assert.equal(lineagePreview(' 甲\n\n乙 '), '甲 乙')
+  assert.equal(lineagePreview('一二三四五', 3), '一二三…')
+  assert.equal(lineagePreview('', 10), '')
+  assert.equal(lineagePreview(null, 10), '')
+})
+
+/** fetch 桩：按 URL 回放给定 payload（可抛）。 */
+function stubFetch(payload, { throws = false } = {}) {
+  const seen = []
+  globalThis.fetch = (url) => {
+    seen.push(String(url))
+    if (throws) return Promise.reject(new Error('网络断了'))
+    return Promise.resolve({ status: 200, json: () => Promise.resolve(payload) })
+  }
+  return seen
+}
+
+test('loadLineage：成功 → 透出 versions / currentIndex / kind', async () => {
+  const payload = {
+    ok: true, kind: 'reasoning', currentIndex: 1,
+    versions: [
+      { index: 0, source: 'original', text: '原稿', eventSeq: null },
+      { index: 1, source: 'patch', text: '改', eventSeq: 42 },
+    ],
+  }
+  const seen = stubFetch(payload)
+  const res = await loadLineage('sess/1', 7, 2, 'reasoning')
+  assert.equal(res.ok, true)
+  assert.equal(res.kind, 'reasoning')
+  assert.equal(res.currentIndex, 1)
+  assert.equal(res.versions.length, 2)
+  assert.ok(seen[0].includes('sessionId=sess%2F1'), 'sessionId 必须编码，实际：' + seen[0])
+  assert.ok(seen[0].includes('seq=7'), '实际：' + seen[0])
+  assert.ok(seen[0].includes('blockIndex=2'), '实际：' + seen[0])
+  assert.ok(seen[0].includes('kind=reasoning'), '实际：' + seen[0])
+})
+
+test('loadLineage：kind 缺省按 text 请求', async () => {
+  const seen = stubFetch({ ok: true, kind: 'text', currentIndex: 0, versions: [] })
+  await loadLineage('s', 1, 0)
+  assert.ok(seen[0].includes('kind=text'), '实际：' + seen[0])
+})
+
+test('loadLineage：业务失败 → ok:false + code 透出（UI 靠它出文案）', async () => {
+  stubFetch({ ok: false, code: 'original-not-found', error: '找不到原始事件' })
+  const res = await loadLineage('s', 1, 0)
+  assert.equal(res.ok, false)
+  assert.equal(res.code, 'original-not-found')
+  assert.ok(res.error.includes('找不到原始事件'))
+})
+
+test('loadLineage：网络异常 → ok:false 带 error，不抛', async () => {
+  stubFetch(null, { throws: true })
+  const res = await loadLineage('s', 1, 0)
+  assert.equal(res.ok, false)
+  assert.ok(res.error.includes('网络断了'))
+})
+
 // ── 跑 ─────────────────────────────────────────────────────────────────────
 
 let failed = 0
 for (const t of tests) {
   try {
-    t.fn()
+    await t.fn()
     console.log('  PASS  ' + t.name)
   } catch (error) {
     failed += 1
