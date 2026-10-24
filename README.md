@@ -167,7 +167,7 @@ dsh plugin --profile desktop add dsh-reply-forge-v3
   所以 v3 在写路径上包了 shim，进入宿主持久化前统一补标记
   （详见上面「关掉插件会不会把会话弄坏」）。
 
-**关于宿主升级（v3.4.0 起）**：宿主 0.2.1 在读 v3 世代的旧会话文件时会做格式迁移，
+**关于宿主升级（v3.4.1 起）**：宿主 0.2.1 在读 v3 世代的旧会话文件时会做格式迁移，
 把「未知类型 + `ignorable`」的事件改名成 `plugin:<原类型>` 写盘——我们的
 `reply-forge/patch` 会变成 `plugin:reply-forge/patch`。投影是按类型精确匹配的，
 所以本插件**两种类型都注册、读侧都接受**（`projectedTextsOf` 投影基准与版本血统

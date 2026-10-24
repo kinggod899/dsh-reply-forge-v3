@@ -214,7 +214,7 @@ same-type projection rewrites the target message.
   that field, so v3 wraps the write handle with a shim that stamps it before the host
   persists (see "Will disabling the plugin corrupt my sessions?" above).
 
-**About host upgrades (since v3.4.0)**: when host 0.2.1 reads a v3-generation session
+**About host upgrades (since v3.4.1)**: when host 0.2.1 reads a v3-generation session
 file it runs a format migration that renames every "unknown type + `ignorable`" event to
 `plugin:<original type>` and writes it back — our `reply-forge/patch` becomes
 `plugin:reply-forge/patch`. Projections match event types exactly, so this plugin
