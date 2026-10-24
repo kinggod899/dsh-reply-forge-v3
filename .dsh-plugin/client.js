@@ -1084,7 +1084,32 @@ function recordNeedsRefresh(entry, domBlockCount, signature) {
 
 
 
-function matchBlocks(diskBlocks, domTexts) {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function matchBlocks(diskBlocks, domTexts, options = {}) {
+  const canonical = typeof options.canonical === 'function' ? options.canonical : null
+  
+  const keysOf = block => {
+    const raw = normalizeText(block.text)
+    if (canonical === null) return [raw]
+    const rendered = canonical(block.text)
+    
+    if (rendered === '') return [raw]
+    const norm = normalizeText(rendered)
+    return norm === raw ? [raw] : [raw, norm]
+  }
   const out = domTexts.map(() => null)
   const used = new Set()
   const domNorm = domTexts.map(normalizeText)
@@ -1092,9 +1117,10 @@ function matchBlocks(diskBlocks, domTexts) {
   
   const byText = new Map()
   diskBlocks.forEach((b, i) => {
-    const key = normalizeText(b.text)
-    if (!byText.has(key)) byText.set(key, [])
-    byText.get(key).push(i)
+    for (const key of keysOf(b)) {
+      if (!byText.has(key)) byText.set(key, [])
+      byText.get(key).push(i)
+    }
   })
   domNorm.forEach((key, di) => {
     if (key === '') return
@@ -2062,6 +2088,33 @@ function isOwnUi(el) {
 }
 
 
+const TEXT_SKIP_TAGS = new Set(['TEXTAREA', 'BUTTON', 'SCRIPT', 'STYLE', 'SVG', 'NOSCRIPT'])
+
+
+
+
+
+
+
+
+const TEXT_BREAK_TAGS = new Set([
+  'P', 'DIV', 'PRE', 'UL', 'OL', 'LI', 'BLOCKQUOTE',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'CAPTION',
+  'SECTION', 'ARTICLE', 'FIGURE', 'FIGCAPTION', 'DETAILS', 'SUMMARY',
+  'DL', 'DT', 'DD', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV', 'FORM',
+  'HR', 'BR',
+])
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2071,15 +2124,76 @@ function isOwnUi(el) {
 
 
 function ownText(el) {
-  const kids = el.children ?? []
-  if (kids.length === 0) return String(el.textContent ?? '').replace(/\s+/g, ' ').trim()
-  let out = ''
-  for (const child of kids) {
-    if (isOwnUi(child)) continue
-    if (child.tagName === 'TEXTAREA' || child.tagName === 'BUTTON') continue
-    out += ownText(child) + ' '
+  const out = []
+  collectOwnText(el, out)
+  return out.join('').replace(/\s+/g, ' ').trim()
+}
+
+
+function collectOwnText(node, out) {
+  if (node === null || node === undefined) return
+  
+  if (node.nodeType === 3) {
+    out.push(String(node.nodeValue ?? node.data ?? ''))
+    return
   }
-  return out.replace(/\s+/g, ' ').trim()
+  
+  if (node.nodeType !== undefined && node.nodeType !== 1) return
+  const tag = typeof node.tagName === 'string' ? node.tagName : ''
+  if (tag !== '') {
+    if (TEXT_SKIP_TAGS.has(tag.toUpperCase())) return
+    if (isOwnUi(node)) return
+  }
+  const brk = tag !== '' && TEXT_BREAK_TAGS.has(tag.toUpperCase())
+  if (brk === true) out.push(' ')
+  
+  
+  if (typeof node._text === 'string' && node._text !== '') out.push(node._text)
+  const kids = node.childNodes ?? node.children ?? []
+  for (const kid of kids) collectOwnText(kid, out)
+  if (brk === true) out.push(' ')
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const plainCache = new Map()
+const PLAIN_CACHE_MAX = 600
+
+function plainTextOfMarkdown(source, docOverride) {
+  const key = String(source ?? '')
+  const hit = plainCache.get(key)
+  if (hit !== undefined) return hit
+  let out = ''
+  try {
+    const doc = docOverride ?? document
+    const box = doc.createElement('div')
+    renderMarkdown(box, key, doc)
+    out = ownText(box)
+  } catch (error) {
+    log('渲染记录文本失败', error)
+    out = ''
+  }
+  
+  if (out === '') out = normalizeText(key)
+  if (plainCache.size >= PLAIN_CACHE_MAX) plainCache.clear()
+  plainCache.set(key, out)
+  return out
+}
+
+
+function matchPageBlocks(diskBlocks, domTexts, docOverride) {
+  return matchBlocks(diskBlocks, domTexts, { canonical: text => plainTextOfMarkdown(text, docOverride) })
 }
 
 
@@ -3150,12 +3264,26 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   // 选了就要关掉「仅本机渲染」——那条出口只能改本节点在页面上的样子。
   let pickedForeign = false
 
-  // 初值取「当前显示的正文」：有本机覆盖就是覆盖内容，否则是块里非本插件 UI 的文本。
+  // 初值取「模型此刻读到的那份文本」，三种来源按可信度排序：
+  //   1. 有本机覆盖 → 覆盖内容（页面上显示的就是它）；
+  //   2. 已**精确**对上记录 → 记录里的原文（markdown 源码）；
+  //   3. 定位不到 / 只是顺序推断 → 页面上看得见的文本。
+  //
+  // 第 2 条是 2026-10-23 补的，两个理由：
+  //  · 页面是**渲染结果**，拿它当初值保存回去会把加粗/标题/代码块全部拍平成
+  //    纯文本——用户只是改个错别字，格式全没了；
+  //  · 记录原文与 expectText 同源，写入时的陈旧校验天然自洽。
+  // 只在 exact 时用它：顺序推断出来的 match.text 可能属于另一条消息，
+  // 拿它填编辑器比填碎片更糟。
   const blockFp = taken.get(block)
   const applied = blockFp === undefined ? undefined : loadOverrides(sessionId)[blockFp]
+  const locatedSource = match !== null && match.exact === true
+    && typeof match.text === 'string' && match.text !== ''
+    ? match.text
+    : null
   const original = (applied !== undefined && typeof applied.text === 'string')
     ? applied.text
-    : ownText(block)
+    : (locatedSource ?? ownText(block))
 
   const wrap = doc.createElement('div')
   wrap.className = 'rf3-editor'
@@ -3456,7 +3584,7 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
         const idx = live.indexOf(block)
         const fresh = idx === -1
           ? null
-          : (matchBlocks(rec.blocks, live.map(ownText))[idx] ?? null)
+          : (matchPageBlocks(rec.blocks, live.map(ownText), doc)[idx] ?? null)
         if (fresh === null) {
           notes.append(makeNote(doc, 'warn',
             '✖ 自动重试失败：重新读取后这条回复仍对不上记录。点「重新读取」打开新编辑器再试。'))
@@ -3524,9 +3652,12 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
       match = blockMatch.get(block) ?? null
       const fp = taken.get(block)
       const appliedLocal = fp === undefined ? undefined : loadOverrides(sessionId)[fp]
+      // 与初值同一口径：精确对上记录时填记录原文，否则填页面文本。
       area.value = (appliedLocal !== undefined && typeof appliedLocal.text === 'string')
         ? appliedLocal.text
-        : ownText(block)
+        : ((match !== null && match.exact === true && typeof match.text === 'string' && match.text !== '')
+            ? match.text
+            : ownText(block))
       saveLocal.disabled = false
     } else {
       const rec = cachedRecord(sessionId)
@@ -3536,10 +3667,15 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
       // 目标清单直接来自宿主（在线模式下就是模型可见的那一份），
       // 所以定位是确定的，exact: true。
       match = { seq: found.seq, blockIndex: found.blockIndex, kind: found.kind ?? 'text', text: found.text, exact: true }
-      pickedForeign = true
+      // 「选回自己这条」不算改别的消息。
+      // 旧实现把下拉里的**任何**选择都当外来目标，于是用户在长回复上点开编辑器、
+      // 从下拉里重新选中这条消息（拿到完整正文）后写入——内容确实写进了会话，
+      // 但本机覆盖被跳过，页面上一个字都不变，用户看到的就是「改了不生效」。
+      const own = blockMatch.get(block) ?? null
+      pickedForeign = !(own !== null && own.seq === found.seq && own.blockIndex === found.blockIndex)
       area.value = found.text
       // 本机渲染只能改本节点，改别的消息时这条出口没有意义。
-      saveLocal.disabled = true
+      saveLocal.disabled = pickedForeign
     }
     currentValue = match === null ? '' : match.seq + ':' + match.blockIndex
     renderMatch()
@@ -3711,7 +3847,7 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
             .then(() => {
               const fresh = cachedRecord(sessionId)
               if (fresh === null || fresh.error !== null || fresh.blocks.length === 0) return
-              const next = matchBlocks(fresh.blocks, liveTexts)[idx] ?? null
+              const next = matchPageBlocks(fresh.blocks, liveTexts, doc)[idx] ?? null
               if (next !== null) {
                 match = next
                 blockMatch.set(block, next)
@@ -3882,7 +4018,7 @@ function scan(getSessionId, prefs, docOverride) {
   // 落盘出口禁用——不猜位置。
   const rec = cachedRecord(sessionId)
   const matches = (rec !== null && rec.error === null && rec.blocks.length > 0)
-    ? matchBlocks(rec.blocks, texts)
+    ? matchPageBlocks(rec.blocks, texts, doc)
     : blocks.map(() => null)
 
   blocks.forEach((block, i) => {
@@ -4115,7 +4251,7 @@ function apply(ctx) {
   // 两个插件同时装（--keep-v2）时同名会互相覆盖，排查时根本分不清是谁。
   try {
     window.__dshReplyForgeV3 = {
-      version: '3.4.0',
+      version: '3.4.1',
       sessionId() { return sessionId },
       /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
       domSessionId() { return currentSessionId(document) },
@@ -4151,7 +4287,7 @@ function apply(ctx) {
         }
         if (rec === null) return { ...head, ok: false, error: '记录未加载' }
         if (rec.error !== null) return { ...head, ok: false, error: rec.error }
-        const matches = matchBlocks(rec.blocks, texts)
+        const matches = matchPageBlocks(rec.blocks, texts)
         return {
           ...head,
           ok: true,
