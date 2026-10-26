@@ -91,11 +91,21 @@ export function readLiveBlocks(sessions, sessionId) {
       if (message === null || message === undefined) continue
       const base = event?.data?.message
       for (const block of listBlocks(message.content)) {
-        blocks.push({ seq, blockIndex: block.blockIndex, kind: block.kind, text: block.text })
         // 与原始事件的同一块逐个比对：投影改写了哪块就记哪块。
         // 形状与落盘读（routes.mjs 的 patched）保持一致——{seq, blockIndex}，
         // 客户端拿到的契约不分在线/落盘。
         const origin = readBlock(base?.content ?? [], block.blockIndex)
+        // rawText = **未投影**的原文。客户端拿它当覆盖表的规范键（内容寻址）：
+        // 宿主 UI 不渲染投影，刷新后页面上是原文，只有锚在原文上的键才对得上
+        // （2026-10-26 BUG-7：锚在「接管那一刻 DOM 文本」上，反复编辑后会锚到
+        // 上一版伪造，刷新后键失配 → 覆盖失效 → 显示回原文）。
+        blocks.push({
+          seq,
+          blockIndex: block.blockIndex,
+          kind: block.kind,
+          text: block.text,
+          rawText: origin?.text ?? block.text,
+        })
         if ((origin?.text ?? null) !== block.text) {
           patched.push({ seq, blockIndex: block.blockIndex })
         }

@@ -120,6 +120,58 @@ test('applyPatch：改正文时不动签名（正文块本来就没有）', () =
   assert.equal(message.content[0].signature, 'SIG-1', '别的块的签名不受影响')
 })
 
+// ── 签名还有第二个住处：source.replayState.blocks[i].signature ────────────
+// provider 序列化历史时会把它原样回填到 thinking 块上（dsh-llm-deepseek 的
+// readReplay → assistant()）。只删块上的 signature，伪造正文仍会带着「对原文
+// 的签名」发出去，签名校验型 provider 会拒掉整条请求——表现就是「伪造写进去了
+// 但下位模型不采信」。这一组是那条链路的钉子。
+
+/** 造一条带 replay 元数据的助手消息（形状照 deepseek-messages replayState v1）。 */
+function assistantMessageWithReplay() {
+  const base = assistantMessage()
+  return {
+    ...base,
+    source: {
+      ...base.source,
+      replayState: {
+        response: { kind: 'deepseek-messages', version: 1, model: 'm' },
+        blocks: [
+          { type: 'reasoning', signature: 'REPLAY-SIG-1' },
+          { type: 'text' },
+          { type: 'tool-call' },
+          { type: 'text' },
+        ],
+      },
+    },
+  }
+}
+
+test('applyPatch：改推理块 → 连带剥掉 replayState 里的签名（防 provider 拒请求）', () => {
+  const msg = assistantMessageWithReplay()
+  const { message, applied } = applyPatch(msg, [{ seq: 1, blockIndex: 0, kind: 'reasoning', text: '伪造推理' }])
+  assert.equal(applied, 1)
+  assert.equal('signature' in message.source.replayState.blocks[0], false, 'replay 元数据里的签名必须一并剥掉')
+  assert.equal(message.source.replayState.blocks[1].type, 'text', '其余 replay 条目原样保留')
+  assert.equal(message.source.replayState.response.model, 'm', 'response 信封不能丢')
+  // 不得就地改原消息：宿主消息是 deepFreeze 的，就地改在真机会抛。
+  assert.equal(msg.source.replayState.blocks[0].signature, 'REPLAY-SIG-1', '原消息的 replay 元数据保持不变')
+  assert.equal('signature' in msg.content[0], true, '原消息的块签名保持不变')
+})
+
+test('applyPatch：改正文 → replayState 原样保留（不做无谓的 source 替换）', () => {
+  const msg = assistantMessageWithReplay()
+  const { message } = applyPatch(msg, [{ seq: 1, blockIndex: 1, kind: 'text', text: '伪造正文' }])
+  assert.equal(message.source, msg.source, '没有推理块被改时，source 引用必须原样带过去')
+  assert.equal(message.source.replayState.blocks[0].signature, 'REPLAY-SIG-1')
+})
+
+test('applyPatch：消息没有 replayState → 照常改，不抛也不造新 source', () => {
+  const msg = assistantMessage()
+  const { message } = applyPatch(msg, [{ seq: 1, blockIndex: 0, kind: 'reasoning', text: '伪造推理' }])
+  assert.equal(message.content[0].text, '伪造推理')
+  assert.equal(message.source, msg.source, '没有 replay 元数据时不该替换 source')
+})
+
 test('applyPatch：块种类不符 → 跳过该条，其余照常', () => {
   const msg = assistantMessage()
   const { message, applied, skipped } = applyPatch(msg, [

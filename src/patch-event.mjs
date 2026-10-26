@@ -209,6 +209,8 @@ export function applyPatch(message, targets) {
 
   const skipped = []
   const next = content.slice()
+  /** 被改写的推理块下标（用来连带清理 replay 元数据里的签名）。 */
+  const reasoningRewritten = []
   for (const [blockIndex, target] of latest) {
     const view = readBlock(content, blockIndex)
     if (view === null) {
@@ -228,9 +230,51 @@ export function applyPatch(message, targets) {
     if (target.kind === 'reasoning') {
       delete patched.signature
       delete patched.thinkingSignature
+      reasoningRewritten.push(blockIndex)
     }
     next[blockIndex] = patched
   }
   const applied = latest.size - skipped.length
-  return { message: { ...message, content: next }, applied, skipped }
+  const out = { ...message, content: next }
+  // 签名还有第二个住处：`source.replayState.blocks[i].signature`。
+  // provider 序列化历史时（dsh-llm-deepseek 的 readReplay → assistant()）会把
+  // 它**原样回填**到 thinking 块上——只删块上的 signature 的话，伪造正文会
+  // 带着「对原文的签名」发出去，签名校验型 provider（Anthropic 系）会拒掉整条
+  // 请求，表现为「伪造明明写进去了，下位模型却不采信」。这里一并剥掉。
+  // 缺失 signature 是合法的（validateReplay 只在「有 signature 但类型不对」时
+  // 判失败），所以删掉只会让该块退化成无签名，不会让整段 replay 降级。
+  const stripped = stripReplaySignatures(message?.source, reasoningRewritten)
+  if (stripped !== null) out.source = stripped
+  return { message: out, applied, skipped }
+}
+
+/**
+ * 剥掉 `source.replayState.blocks[i]` 上的签名，返回**新** source（不改原对象：
+ * 宿主的消息是 deepFreeze 的，就地改会抛）。
+ *
+ * 只在确实有签名可剥时才构造新对象；否则返回 null，让调用方保留原 source
+ * （少一次无意义的浅拷贝，也避免给 deepFreeze 的引用做无谓替换）。
+ *
+ * @param {object|undefined} source 消息的 source 元数据
+ * @param {number[]} blockIndexes 被改写的推理块下标
+ * @returns {object|null} 新 source；无需改动时 null
+ */
+function stripReplaySignatures(source, blockIndexes) {
+  if (blockIndexes.length === 0) return null
+  if (source === null || typeof source !== 'object') return null
+  const replay = source.replayState
+  if (replay === null || typeof replay !== 'object') return null
+  if (Array.isArray(replay.blocks) === false) return null
+  let changed = false
+  const blocks = replay.blocks.map((block, index) => {
+    if (blockIndexes.includes(index) === false) return block
+    if (block === null || typeof block !== 'object') return block
+    if (!('signature' in block)) return block
+    changed = true
+    const copy = { ...block }
+    delete copy.signature
+    return copy
+  })
+  if (changed === false) return null
+  return { ...source, replayState: { ...replay, blocks } }
 }

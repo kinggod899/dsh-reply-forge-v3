@@ -728,6 +728,13 @@ test('读路由：落盘读取过投影——patch 事件改写块文本（与�
     [TEXT_A, '这是被在线伪造改过的第二条回复。'],
     '落盘读到的必须是投影后的文本——与模型所见、与在线 stale 校验基准同口径')
   assert.deepEqual(r.body.patched, [{ seq: 2, blockIndex: 0 }], 'patched 清单要报出哪些块被投影改过')
+  // rawText 恒为**未投影**原文：客户端拿它当覆盖表的规范键。宿主刷新后走
+  // session-query 冷读（投影列表硬编码，插件投影进不去）会把页面渲染回原文，
+  // 只有锚在原文上的键才对得上（2026-10-26 BUG-7）。
+  assert.deepEqual(r.body.blocks.map(b => b.rawText),
+    [TEXT_A, TEXT_B],
+    'rawText 必须是磁盘原文，不能跟着投影变')
+  assert.equal(r.body.blocks[1].text, '这是被在线伪造改过的第二条回复。', 'text 仍是投影后文本')
   rmSync(home, { recursive: true, force: true })
 })
 

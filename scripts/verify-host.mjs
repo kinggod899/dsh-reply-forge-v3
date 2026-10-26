@@ -67,6 +67,45 @@ export function loadBaseline(repoRoot) {
   return parsed
 }
 
+/**
+ * 判定宿主「活会话」折叠时用的是注册表投影（`this.projections`，含插件注册的）
+ * 还是冷读那份**硬编码**列表（`currentSessionMessageProjections`）。
+ *
+ * 为什么要这一项（2026-10-26 BUG-7 实证）：宿主的冷读路径
+ * （`dsh-session-query` 折叠、`dsh-session-persistence-jsonl` 的 readStoredLog）
+ * 用 `currentSessionMessageProjections = [imageOffloadProjection]`——插件投影进不去，
+ * 所以「刷新后界面回原文」是宿主设计、插件无解。但**模型侧采信**靠的是活会话
+ * （`SessionStore.prepare` → `this.projections`）。万一哪天宿主把活会话也换成
+ * 硬编码列表，伪造就再也不会被下位模型看到，而且**不报错**——这条检查是报警器。
+ *
+ * 只做字符串判定（构造带 cordis ctx 的 SessionStore 成本过高）；结构变化时
+ * 退回 WARN 交人工复核，不误报 FAIL。
+ *
+ * @param {string} src 宿主 dsh-session 的源码文本（lib/types/index.js + lib/index.js）
+ * @returns {{level:'PASS'|'FAIL'|'WARN', detail:string}}
+ */
+export function judgeLiveSessionProjectionSource(src) {
+  if (typeof src !== 'string' || src.trim() === '') {
+    return { level: 'WARN', detail: '读不到 dsh-session 源码，无法静态核验活会话投影来源——请人工确认 SessionStore.prepare 仍传 this.projections' }
+  }
+  const calls = [...src.matchAll(/Session\.fromRestore\([^;]{0,400}/g)].map(m => m[0])
+  if (calls.length === 0) {
+    return { level: 'WARN', detail: '源码里没找到 Session.fromRestore 调用（结构可能已改），请人工确认活会话投影来源' }
+  }
+  const hardcoded = calls.filter(c => c.includes('currentSessionMessageProjections'))
+  if (hardcoded.length > 0) {
+    return {
+      level: 'FAIL',
+      detail: `活会话恢复改用了硬编码投影列表（currentSessionMessageProjections）——插件投影不再参与折叠，模型侧不再采信伪造。必须适配（见 CHANGELOG v3.4.2 / PLAN §9）`,
+    }
+  }
+  const registered = calls.filter(c => c.includes('this.projections'))
+  if (registered.length === 0) {
+    return { level: 'WARN', detail: `Session.fromRestore 有 ${calls.length} 处调用但没看到 this.projections，请人工确认投影来源` }
+  }
+  return { level: 'PASS', detail: `活会话恢复用注册表投影（this.projections，${registered.length} 处），硬编码冷读列表未侵入` }
+}
+
 /** semver 三元组（认 x.y.z 前缀）；认不出返回 null。 */
 function semverTuple(value) {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(value))
@@ -562,7 +601,21 @@ async function layerT1(baseline, ctx) {
   check(L, '投影注册面', shapeOk ? 'PASS' : 'FAIL',
     shapeOk ? `两个投影（${types.join(' + ')}），project 为同一函数` : `形状不对：${JSON.stringify(types)}`)
 
-  // k. 强制跑宿主门控测试套件（缺宿主 = FAIL，不是 SKIP）
+  // k. 核心采信底座：活会话折叠必须用注册表投影（this.projections）
+  // 冷读路径用硬编码列表是宿主设计（刷新后界面回原文，插件无解）；但活会话
+  // 若也被换成硬编码列表，模型侧就再也不采信伪造了——必须报警。
+  let liveSrc = ''
+  // findHostPackage 返回的是 `lib/index.js` 的**文件**路径，包根要往上退两级。
+  const sessionPkgDir = path.dirname(path.dirname(sessionPkg))
+  for (const rel of ['lib/types/index.js', 'lib/index.js']) {
+    const file = path.join(sessionPkgDir, rel)
+    if (existsSync(file) === false) continue
+    try { liveSrc += readFileSync(file, 'utf8') } catch { /* 换下一个 */ }
+  }
+  const liveVerdict = judgeLiveSessionProjectionSource(liveSrc)
+  check(L, '活会话投影来源（核心采信底座）', liveVerdict.level, liveVerdict.detail)
+
+  // l. 强制跑宿主门控测试套件（缺宿主 = FAIL，不是 SKIP）
   // 子进程环境：--extract 跑的要显式指向新提取树；其余情况原样继承
   // （父进程能解析到，子进程用同一套三级解析同样能解析到）。
   const childEnv = { ...process.env }

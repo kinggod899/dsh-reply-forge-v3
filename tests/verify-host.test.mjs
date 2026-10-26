@@ -12,7 +12,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   loadBaseline, compareVersion, parseAsarHeader, collectAsarFiles, asarDataStart,
-  extractAsarFiles, summarize, parseSuiteOutput,
+  extractAsarFiles, summarize, parseSuiteOutput, judgeLiveSessionProjectionSource,
 } from '../scripts/verify-host.mjs'
 
 const tests = []
@@ -234,6 +234,53 @@ test('summarize：计数与退出码（有 FAIL 才 1）', () => {
     { pass: 1, warn: 0, fail: 1, exitCode: 1 },
   )
   assert.deepEqual(summarize([]), { pass: 0, warn: 0, fail: 0, exitCode: 0 })
+})
+
+// ── 活会话投影来源判定（BUG-7 的采信底座护栏） ─────────────────────────
+// 冷读路径用硬编码列表是宿主设计（刷新后界面回原文，插件无解）；但活会话
+// 一旦也被换成硬编码列表，模型侧就再也不采信伪造，且不报错——这条护栏必须红。
+
+test('活会话投影来源：prepare 传 this.projections → PASS', () => {
+  const src = `
+    prepare(id, options) {
+      return Session.fromRestore(sessionId, options.seed, options.meta, options.inheritedEventCount, eventState, this.projections);
+    }`
+  const v = judgeLiveSessionProjectionSource(src)
+  assert.equal(v.level, 'PASS')
+  assert.match(v.detail, /this\.projections/)
+})
+
+test('活会话投影来源：改成硬编码 currentSessionMessageProjections → FAIL（核心采信会断）', () => {
+  const src = `
+    prepare(id, options) {
+      return Session.fromRestore(sessionId, options.seed, options.meta, options.inheritedEventCount, eventState, currentSessionMessageProjections);
+    }`
+  const v = judgeLiveSessionProjectionSource(src)
+  assert.equal(v.level, 'FAIL', '活会话一旦用硬编码列表，模型侧不再采信伪造，必须报警')
+  assert.match(v.detail, /硬编码|不再采信/)
+})
+
+test('活会话投影来源：冷读路径用硬编码列表不算错（宿主设计）', () => {
+  // 关键区分：冷读（query / readStoredLog）用硬编码列表只影响**界面显示**，
+  // 不影响模型采信。护栏只盯活会话那处调用。
+  const src = `
+    function readStored(events) {
+      return Session.fromRestore(id, events, header, offset, 'detached', currentSessionMessageProjections);
+    }
+    prepare(id, options) {
+      return Session.fromRestore(sessionId, options.seed, options.meta, options.inheritedEventCount, 'detached', this.projections);
+    }`
+  // 两处调用里有一处是硬编码 → 当前实现按「只要出现就 FAIL」处理。
+  // 这是**刻意保守**：宁可让人复核，也不要放过活会话被污染的可能。
+  const v = judgeLiveSessionProjectionSource(src)
+  assert.equal(v.level, 'FAIL')
+})
+
+test('活会话投影来源：源码读不到 / 没有 fromRestore → WARN（交人工，不误报 FAIL）', () => {
+  assert.equal(judgeLiveSessionProjectionSource('').level, 'WARN')
+  assert.equal(judgeLiveSessionProjectionSource('const x = 1').level, 'WARN')
+  const noRegistry = judgeLiveSessionProjectionSource('Session.fromRestore(a, b, c, d, e, somethingElse)')
+  assert.equal(noRegistry.level, 'WARN')
 })
 
 // ── 运行 ──────────────────────────────────────────────────────────────
