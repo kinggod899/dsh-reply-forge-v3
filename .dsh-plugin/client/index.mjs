@@ -93,6 +93,15 @@ const dupCount = new WeakMap()
 /** 已接管的节点 → 落盘记录里的对应块（null = 没对上，落盘出口禁用）。 */
 const blockMatch = new WeakMap()
 
+/**
+ * 已接管的节点 → 已经按哪个覆盖键渲染过。
+ *
+ * 覆盖渲染现在有两条入口：首次接管（match 已到）和「记录后到、键被纠正」
+ * 那条延迟入口。没有这个标记，每轮扫描都会重渲染一次，把用户正在编辑的
+ * 内容/选区打回覆盖文本。
+ */
+const appliedFp = new WeakMap()
+
 /** 进行中的强制读记录请求：sessionId → Promise。并发触发时只发一次网络请求。 */
 const recordInflight = new Map()
 
@@ -2015,6 +2024,38 @@ function sameMatch(a, b) {
 }
 
 /**
+ * 这个块上是否开着编辑器（开在**这个块**上才算，别的块开着不算）。
+ * 覆盖渲染会整体重写块内容，必须避开正在编辑的块，否则用户的输入被冲掉。
+ */
+function editorOpenOn(block) {
+  return openEditor !== null && openEditor.block === block
+}
+
+/**
+ * 按覆盖键把覆盖渲染到块上（有覆盖才动手），随后重建操作条。
+ *
+ * 两条入口共用：首次接管（记录已到）与「记录后到、键被纠正」（BUG-7 的
+ * 慢记录场景——首屏接管时 match 还是 null，键只能锚 DOM 文本，等记录到了
+ * 才纠正成磁盘原文指纹；不在这里补渲染的话，覆盖会一直不显示）。
+ *
+ * 幂等：`appliedFp` 记住已经按哪个键渲染过，重复扫描不会重渲染。
+ *
+ * @param {HTMLElement} block 已接管的助手消息块
+ * @param {string} fp 规范键（磁盘原文指纹）
+ * @param {Record<string,{text:string}>} overrides 本会话覆盖表
+ * @param {string|null} [legacyFp] 旧表键（锚在 DOM 文本上），兜底再试一次
+ */
+function applyOverrideIfAny(block, fp, overrides, prefs, doc, getSessionId, match, legacyFp = null) {
+  const entry = overrides[fp] ?? (legacyFp === null ? undefined : overrides[legacyFp])
+  if (entry === undefined || typeof entry.text !== 'string') return
+  if (appliedFp.get(block) === fp) return
+  if (editorOpenOn(block)) return
+  applyOverride(block, entry.text, prefs, doc)
+  appliedFp.set(block, fp)
+  attachBar(block, doc, getSessionId, prefs, match)
+}
+
+/**
  * 接管一个消息节点：挂操作条 + 应用已有覆盖。
  */
 function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, match = null) {
@@ -2029,12 +2070,21 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
     // 记录后到时顺手把覆盖键纠正到「磁盘原文」上（首屏接管时 match 往往还是
     // null，键只能锚当时的 DOM 文本）。不纠正的话，反复编辑后键会锚在上一版
     // 伪造文本上，刷新后页面上是原文、键对不上 → 覆盖失效（BUG-7）。
-    const lateRaw = match !== null && typeof match.rawText === 'string' ? match.rawText : null
+    //
+    // **只认精确匹配**（BUG-8）：末尾对齐兜底给的是推断，可能把这一条错配到
+    // 另一条消息的块上；拿推断出来的 rawText 当键，就会把上一条的覆盖套到
+    // 这一条上（新消息显示旧伪造、还挂着「还原」）。
+    const lateRaw = match !== null && match.exact === true && typeof match.rawText === 'string'
+      ? match.rawText
+      : null
     if (lateRaw !== null) {
       const lateFp = fingerprint(lateRaw)
       if (taken.get(block) !== lateFp) {
         rememberOriginal(lateFp, lateRaw)
         taken.set(block, lateFp)
+        // 键变对了：如果这条正好有覆盖、而且还没渲染过，现在补上。
+        // 否则「首屏接管时记录还没到」的块会一直显示原文（改了不生效的旧症）。
+        applyOverrideIfAny(block, lateFp, overrides, prefs, doc, getSessionId, match)
       }
     }
     if (sameMatch(blockMatch.get(block) ?? null, match ?? null)) return
@@ -2052,7 +2102,12 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
   // 上一版伪造。键一旦锚在伪造上，刷新后拿原文算出的键在表里根本不存在 →
   // 覆盖不命中 → 用户看到「明明是正常的伪造，刷新就恢复了」。
   // 实测：某会话 6 个被投影块，原文键命中 0 个；伪造文本 "1" 的键反倒命中。
-  const rawText = match !== null && typeof match.rawText === 'string' ? match.rawText : null
+  //
+  // 但**只认精确匹配**（BUG-8）：exact:false 是末尾对齐推断，配对可能是错的。
+  // 推断出来的 rawText 属于另一条消息，拿它当键 = 把别人的覆盖画到自己身上。
+  const rawText = match !== null && match.exact === true && typeof match.rawText === 'string'
+    ? match.rawText
+    : null
   const fp = rawText === null ? domFp : fingerprint(rawText)
   // 「还原原文」要还原成**原文**：有磁盘原文就用它（markdown 源码，由
   // applyOverride 渲染），否则退回当前 DOM 文本。
@@ -2069,11 +2124,7 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
 
   attachBar(block, doc, getSessionId, prefs, match)
   // 新键优先；旧表里的键锚在 DOM 文本上（历史遗留），兜底再试一次。
-  const override = overrides[fp] ?? overrides[domFp]
-  if (override !== undefined && typeof override.text === 'string') {
-    applyOverride(block, override.text, prefs, doc)
-    attachBar(block, doc, getSessionId, prefs, match)
-  }
+  applyOverrideIfAny(block, fp, overrides, prefs, doc, getSessionId, match, domFp)
 }
 
 /** 一轮扫描：接管当前所有助手消息块，并刷新落盘定位。 */

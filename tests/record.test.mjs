@@ -171,6 +171,39 @@ test('matchBlocks：规范化后同文本多条仍按出现顺序一一对应', 
   assert.deepEqual(out.map(m => m.exact), [true, true])
 })
 
+// ── rawText 也入索引（2026-10-26 BUG-8 真机）───────────────────────────────
+//
+// 读路由给的 `text` 是**投影后**文本，宿主 UI 不渲染投影 → 被伪造过的块在页面
+// 上显示的是**原文**。只拿 text 建索引，它就永远精确匹配不上，只能落到「末尾
+// 对齐」兜底；新消息一进来，新消息的块被兜底配到这条旧块上，于是新消息显示
+// 上一条的伪造内容、还挂着「还原」按钮（真机：session-7806f695）。
+
+test('matchBlocks：rawText（未投影原文）也入索引 → 被伪造的块凭原文精确对回自己', () => {
+  const strip = t => t.replace(/\*\*/g, '')
+  // 记录：投影后是「1」，磁盘原文是那段长回复；页面上宿主显示的是原文
+  const blocks = [{ seq: 46, blockIndex: 0, kind: 'text', text: '1', rawText: '这类内容**不会**挂出来' }]
+  const out = matchBlocks(blocks, ['这类内容不会挂出来'], { canonical: strip })
+  assert.equal(out[0].seq, 46, '必须凭 rawText 命中自己')
+  assert.equal(out[0].exact, true, '原文命中同样是精确匹配，不是推断')
+})
+
+test('matchBlocks：rawText 命中后，新消息不再被兜底错配到旧块', () => {
+  const strip = t => t.replace(/\*\*/g, '')
+  const blocks = [{ seq: 46, blockIndex: 0, kind: 'text', text: '1', rawText: '原来那段长回复内容' }]
+  // 页面上两条：上一条（原文）+ 新生成的一条（记录里还没有）
+  const out = matchBlocks(blocks, ['原来那段长回复内容', '后来新生成的一条回复'], { canonical: strip })
+  assert.equal(out[0].seq, 46)
+  assert.equal(out[0].exact, true)
+  assert.equal(out[1], null, '新消息必须留空，绝不能被末尾对齐配到旧块上')
+})
+
+test('matchBlocks：text 与 rawText 都不同 → 仍退回末尾对齐（不假装精确）', () => {
+  const blocks = [{ seq: 5, blockIndex: 0, kind: 'text', text: '投影后的内容', rawText: '磁盘原文' }]
+  const out = matchBlocks(blocks, ['页面上完全另一段内容'], { canonical: t => t })
+  assert.equal(out[0].seq, 5, '兜底仍然配对（写入/展示要靠它）')
+  assert.equal(out[0].exact, false, '但必须标成推断，覆盖键不许用它')
+})
+
 // ── v3.4 血统访问层（client/lineage.mjs）────────────────────────────────────
 
 test('versionLabelOf：原稿 / vN / 当前标记', () => {
