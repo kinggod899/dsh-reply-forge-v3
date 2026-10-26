@@ -7,8 +7,18 @@
 
 ## 当前状态（2026-10-26 复核）
 
+- **v3.4.2 已发行（10-26）**：GitHub Release
+  https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.4.2
+  （release id `424411960`，zip 1171084B / tgz 1108865B 双资产已传且与本地字节一致，
+  tag `v3.4.2` → `5b59e8a`）；npm 同日发布成功（`dist-tags.latest = 3.4.2`，
+  17 文件，账号 end1949）。终验：fresh clone 到 tag 后 `build-client --check` OK +
+  **17 套全绿**（无宿主态执行 392 项，`projection` 整体 SKIP、`ignorable` 26/29）；
+  `npm install dsh-reply-forge-v3@3.4.2` 空缓存从 registry 装出 **17 文件**、
+  版本号一致、`client.js` 与仓库产物 148960B 字节相同。
+  本版含 BUG-7（刷新恢复原文）+ BUG-8（新消息套用上一条伪造）。
+
 - **BUG-8「新消息被套上了上一条的伪造内容」已修并合并（10-26 晚，PR #19 → `2d83649`，
-  分支已删，待随 v3.4.2 发行）**：
+  分支已删，随 v3.4.2 发行）**：
   真机症状——改掉倒数第二条回复后，AI 新生成的那条**也显示着上次的伪造内容**，
   还挂着「还原」按钮（会话 `session-7806f695`）。成因链三环：① 读路由的 `text`
   是投影后文本，宿主 UI 不渲染投影 → 被伪造块在页面上显示**原文**；② 定位只拿
@@ -52,10 +62,10 @@
   合并后补一条 `18a1848`（test）：`loadBaseline` 那条断言原本钉死 `0.2.1-rc.2`，
   登记 rc.3 会连带失败——改为版本**形态**匹配（`^\d+\.\d+\.\d+(-[\w.]+)?$`），
   真正的版本校验留给 verify-host T0（基线 vs 本机实测）。
-  **发行仍暂缓**：v3.4.2 只存在于代码里（main 的 `package.json` 已是 3.4.2，
-  但没打 tag、没发 npm、没建 Release），等后续改动一起走发布循环。
-  攒批注意两点：① `host-baseline.json` 已登记到 `0.2.1-rc.3`，别被新宿主再次漂移
-  覆盖；② 该修复只对**新写入**生效，旧伪造块磁盘里无 `rawText` 锚点，需重写一次
+  **发行状态**：曾一度压着攒批，后于 10-26 直接发行（见本节首条 v3.4.2）。
+  攒批期留的两条注意仍然有效：① `host-baseline.json` 已登记到 `0.2.1-rc.3`，
+  宿主再升级时会重新报版本漂移 WARN——那是「请登记新宿主」，不是回归；
+  ② 该修复只对**新写入**生效，旧伪造块磁盘里无 `rawText` 锚点，需重写一次
   才会落到新键上（不是回归）。
 
 - **v3.4.1 已发行（10-24）**：GitHub Release
@@ -221,6 +231,9 @@
 | 10 | **① 升级自检**（verify-host） | ✅ 已实施（10-23，分支 `feat/verify-host`，PR #16 已合并，merge commit `d6570e6`，分支已删，随 v3.4.1 发行） | `scripts/verify-host.mjs`：T0 版本基线比对（`host-baseline.json`：宿主三元组 + 8 包 + 契约期望值）/ T1 契约面十项 + 强制跑 4 个宿主门控套件（缺宿主=FAIL）/ T2 boot 冒烟（host-oracle 配方）/ T3 活体 CDP（委托 diag-focus）。`--extract` 从裸 asar（asar+unpacked 叠加）提取、`--json` 机器可读。「DSH 升级后必跑」写进 使用说明.md 第七节 + 安装插件.bat 末尾提示（npm 包装法不含 scripts/，该提示面向 zip 源码树） |
 | BUG-6 | 长回复点「伪造回复」内容不全；从目标下拉切回该消息后写入「不生效」 | ✅ 已修复（10-23，分支 `fix/long-message-fragment`，随 v3.4.1 发布） | 根因两条：① `ownText` 只遍历 `children`（元素子节点），混合段落 `<p>正文<strong>粗</strong>正文</p>` 的直属文本整段丢失 → 编辑器只剩加粗片段与标题；② 记录是 markdown 源码、页面是渲染结果，字符串直接比永远不等 → 精确定位失效、退化成顺序推断 → 写入打到别的块。修复：`ownText` 按文档顺序遍历含文本节点（块级边界补空格、行内不补）；`matchBlocks` 加 `canonical` 选项，用插件渲染器把源码渲染后再比（源码形态同时入索引，思维链不被误伤）；精确命中时编辑器初值取记录原文（防保存把格式拍平）；下拉「选回自己这条」不再算外来目标（本机渲染照常跟随）。回归 +9（client +5 / record +4），**404 项 / 17 套全绿** |
 | 11 | **③ 就地回溯**（rewind） | 🚫 已评估放弃（10-23 用户评审） | 机制已打通（system/message + surfaceOp:replace + 空 content，PLAN §9.3 留档），但被宿主 `SessionStore.fork(source, boundary)` **严格支配**：同模型效果、fork 有显式分支血缘（parentSession/inheritedEventCount）、双向第一等会话 vs 回溯单向不可逆、forked closers 处理未收尾轮次、零新写杠杆。残余选项另议：逐消息「从这里分支」快捷键（调宿主 fork，非新机制），先确认宿主界面是否已有按消息边界 fork 再定 |
+
+| 12 | **v3.4.2 发布**（BUG-7 刷新恢复原文 + BUG-8 新消息套用上一条伪造） | ✅ 已发布（10-26）：PR #18/#19 合并 → 文档收尾 `5b59e8a` → tag `v3.4.2` → GitHub Release id `424411960`（zip 1171084B / tgz 1108865B，与本地字节一致）→ npm `dist-tags.latest=3.4.2`（17 文件）→ fresh clone 终验通过 | 门禁：`build-client --check` OK / 423 项 17 套全绿 / `verify-host` PASS 27·WARN 0·FAIL 0。无宿主态执行 392 项（`projection` 整体 SKIP、`ignorable` 26/29）。终验：clone 到 tag 后 17 套全绿 + `npm install @3.4.2` 空缓存装出 17 文件、`client.js` 148960B 与仓库产物字节相同。README 中英两版测试口径同步 395→423 |
+| 13 | **awesome-dsh-plugin 条目钉版**：v3.2.0 → v3.4.2 | ⬜ 待提 PR | 上一轮 PR #8495（v3.1.0→v3.2.0）当时待合并，先确认其状态再提；`tarball:` 指向本仓 Release 的 `.tgz`，改完用 `curl -I` 验 200 |
 
 ## 不可破的规则（改代码前必读）
 
