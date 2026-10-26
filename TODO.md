@@ -5,7 +5,39 @@
 > [使用说明.md](./使用说明.md)，深度开发日志在
 > 开发期工作区记忆目录（不随仓库分发），项目级记忆在 `.workbuddy-ai/memory/`。
 
-## 当前状态（2026-10-24 复核）
+## 当前状态（2026-10-26 复核）
+
+- **BUG-7「伪造刷新就恢复」已修（10-26，分支已推、暂缓 PR 与发行）**：用户报「明明是正常的
+  伪造，刷新就恢复」。核查结论——**模型侧一直是好的**，失效的是界面显示层。
+  三条实证：91 条 patch 全落盘且带 ignorable、类型未被迁移改名；真宿主回放
+  5/5 命中；同块连续改 3 次全过陈旧校验（投影没生效的话第二次就 STALE 了）。
+  真因两层：① 宿主刷新/重开走 `dsh-session-query` 冷读，折叠用**硬编码**的
+  `currentSessionMessageProjections = [imageOffloadProjection]`，插件投影进不去
+  （`SessionStore` 活会话才有）→ 页面内显示伪造、刷新后显示原文，这是宿主设计；
+  ② 本机覆盖表（刷新后的唯一兜底）键锚在「接管那一刻 DOM 文本」上，而页面内
+  DOM 是**投影文本**，刷新后拿原文算的键在表里不存在 → 兜底失败。LevelDB 取证：
+  某会话 6 个被投影块原文键命中 **0/6**，被改成 `"1"` 的块伪造键反倒命中。
+  修复：读路由两条路径回传 `rawText`（未投影原文）→ 覆盖键改锚 rawText
+  （内容寻址，跨刷新稳定）+ 旧键兜底 + 记录后到自动纠键 + 还原时清旧键。
+  顺带加固：伪造推理块时连 `source.replayState.blocks[i].signature` 一起剥
+  （provider 序列化会原样回填，只剥块签名会让签名校验型 provider 拒掉整条请求
+  ——「伪造写进去了但下位模型不采信」）。另加升级护栏：verify-host 新增
+  「活会话投影来源」检查（静态核验 `SessionStore.prepare` 仍传 `this.projections`，
+  若哪天宿主把活会话也换成冷读那份硬编码列表 → 采信会整条断且不报错 → 直接 FAIL）。
+  回归 **417 项 / 17 套全绿**（+11）。
+  **已知边界**：换设备/清缓存/无痕仍回原文（覆盖表是本机 localStorage），
+  那一层要宿主把插件投影纳入冷读路径，目前无公开入口。
+  **采信不受影响**：patch 事件在会话文件里，模型请求走活会话的注册表投影
+  （真机自检实测 2 处 `this.projections`，硬编码列表未侵入）——与浏览器存储无关。
+  **当前落地状态（10-26）**：分支 `fix/refresh-restores-forged` 已提交并推送
+  （commit `294857e`，基线 `a6deb02` = origin/main 顶端，15 文件 +536/−25），
+  门禁 `build-client --check` OK / 417 项 17 套全绿 / verify-host PASS 27·WARN 0·FAIL 0。
+  **PR #18 已开（10-26）**：https://github.com/kinggod899/dsh-reply-forge-v3/pull/18
+  （2 commit / 15 文件 +543−25，`mergeable=true`、`mergeable_state=clean`，仓库无 CI）。
+  **发行仍暂缓**：v3.4.2 先攒批，等后续改动一起走发布循环。
+  攒批注意两点：① `host-baseline.json` 已登记到 `0.2.1-rc.3`，别被新宿主再次漂移
+  覆盖；② 该修复只对**新写入**生效，旧伪造块磁盘里无 `rawText` 锚点，需重写一次
+  才会落到新键上（不是回归）。
 
 - **v3.4.1 已发行（10-24）**：GitHub Release
   https://github.com/kinggod899/dsh-reply-forge-v3/releases/tag/v3.4.1

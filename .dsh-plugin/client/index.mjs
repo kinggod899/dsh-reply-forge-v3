@@ -1492,6 +1492,11 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
     const fp = taken.get(block)
     if (typeof fp === 'string') {
       removeOverride(sessionId, fp)
+      // 旧表里的键锚在 DOM 文本上（历史遗留），扫描时会兜底命中它——
+      // 只删规范键的话，用户点「还原」会看到伪造内容被旧键又套回来。
+      // 这里把「当前 DOM 文本」对应的键一并清掉（此时 DOM 上就是覆盖内容）。
+      const domFpNow = fingerprint(ownText(block))
+      if (domFpNow !== fp) removeOverride(sessionId, domFpNow)
       block.removeAttribute(EDIT_ATTR)
       closeEditorOnBlock(doc, block)
       applyOverride(block, fpOriginal(block, fp), prefs, doc)
@@ -2021,6 +2026,17 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
   // 拉到），若不刷新，块会永远停留在接管那一刻的 match=null 上——
   // 表现就是「每条回复都定位不到，落盘出口全程禁用」。踩过。
   if (block.hasAttribute(TAKEN_ATTR)) {
+    // 记录后到时顺手把覆盖键纠正到「磁盘原文」上（首屏接管时 match 往往还是
+    // null，键只能锚当时的 DOM 文本）。不纠正的话，反复编辑后键会锚在上一版
+    // 伪造文本上，刷新后页面上是原文、键对不上 → 覆盖失效（BUG-7）。
+    const lateRaw = match !== null && typeof match.rawText === 'string' ? match.rawText : null
+    if (lateRaw !== null) {
+      const lateFp = fingerprint(lateRaw)
+      if (taken.get(block) !== lateFp) {
+        rememberOriginal(lateFp, lateRaw)
+        taken.set(block, lateFp)
+      }
+    }
     if (sameMatch(blockMatch.get(block) ?? null, match ?? null)) return
     blockMatch.set(block, match)
     attachBar(block, doc, getSessionId, prefs, match)
@@ -2028,8 +2044,19 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
   }
 
   const original = ownText(block)
-  const fp = fingerprint(original)
-  rememberOriginal(fp, original)
+  const domFp = fingerprint(original)
+  // 覆盖表的规范键：优先锚**磁盘原文**（内容寻址，跨刷新/跨重渲染都稳定）。
+  //
+  // 为什么不能用 DOM 文本当键（2026-10-26 BUG-7 实证）：宿主 UI 不渲染投影，
+  // 刷新后页面回到原文；而 DOM 文本在「宿主重渲染 + 已应用过覆盖」之后是
+  // 上一版伪造。键一旦锚在伪造上，刷新后拿原文算出的键在表里根本不存在 →
+  // 覆盖不命中 → 用户看到「明明是正常的伪造，刷新就恢复了」。
+  // 实测：某会话 6 个被投影块，原文键命中 0 个；伪造文本 "1" 的键反倒命中。
+  const rawText = match !== null && typeof match.rawText === 'string' ? match.rawText : null
+  const fp = rawText === null ? domFp : fingerprint(rawText)
+  // 「还原原文」要还原成**原文**：有磁盘原文就用它（markdown 源码，由
+  // applyOverride 渲染），否则退回当前 DOM 文本。
+  rememberOriginal(fp, rawText ?? original)
   taken.set(block, fp)
   dupCount.set(block, dup)
   blockMatch.set(block, match)
@@ -2041,7 +2068,8 @@ function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, 
   block.classList.add('rf3-host')
 
   attachBar(block, doc, getSessionId, prefs, match)
-  const override = overrides[fp]
+  // 新键优先；旧表里的键锚在 DOM 文本上（历史遗留），兜底再试一次。
+  const override = overrides[fp] ?? overrides[domFp]
   if (override !== undefined && typeof override.text === 'string') {
     applyOverride(block, override.text, prefs, doc)
     attachBar(block, doc, getSessionId, prefs, match)
@@ -2313,7 +2341,7 @@ export function apply(ctx) {
   // 两个插件同时装（--keep-v2）时同名会互相覆盖，排查时根本分不清是谁。
   try {
     window.__dshReplyForgeV3 = {
-      version: '3.4.1',
+      version: '3.4.2',
       sessionId() { return sessionId },
       /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
       domSessionId() { return currentSessionId(document) },

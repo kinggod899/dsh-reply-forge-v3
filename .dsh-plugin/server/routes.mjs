@@ -115,7 +115,12 @@ export function registerRoutes(webServer, sessions) {
         const blocks = rawBlocks.map(b => {
           const byBlock = projected.get(b.seq)
           const text = byBlock === undefined ? undefined : byBlock.get(b.blockIndex)
-          return text === undefined ? b : { ...b, text }
+          // rawText 恒为**未投影**原文；text 是模型实际看到的投影后文本。
+          // 客户端拿 rawText 当覆盖表规范键：宿主 UI 不渲染投影，刷新后页面
+          // 显示的是原文，只有锚在原文上的键才对得上（2026-10-26 BUG-7）。
+          return text === undefined
+            ? { ...b, rawText: b.text }
+            : { ...b, rawText: b.text, text }
         })
         const patched = []
         for (const [seq, byBlock] of projected) {

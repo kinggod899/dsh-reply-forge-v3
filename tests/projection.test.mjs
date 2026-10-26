@@ -206,6 +206,62 @@ test('回归：键名写成 start/end 的 replace 必抛（本机宿主实测过
   }, /invalid replace surfaceOp/)
 })
 
+// ── 模型采信链路：签名有两个住处，必须一起剥 ────────────────────────────
+// 判据不是界面，是 `session.deriveMessages()`——agent-loop 组装请求时用的就是它
+// （dsh-agent-loop: `const boundaryMessages = session.deriveMessages()`）。
+// provider 序列化历史时会把 `source.replayState.blocks[i].signature` 回填到
+// thinking 块上（dsh-llm-deepseek 的 readReplay → assistant()）。只剥块上的
+// signature，伪造的思维链会带着「对原文的签名」发出去，签名校验型 provider
+// 会拒掉整条请求——症状是「伪造写进去了，下位模型却不采信」。
+
+/** 造一条带 replay 元数据的助手消息（形状照 deepseek-messages replayState v1）。 */
+function makeSessionWithReplay(projections = [patchProjection]) {
+  const s = Session.create(SessionId('session-rf3-replay'), [], undefined, SessionLogOffset(0), projections)
+  s.append('system/message', { turn: 0, step: 0, message: { id: 'm-sys', role: 'system', source: SYS, content: [{ type: 'text', text: 'SYS' }] } }, { surfaceOp: 'append' })
+  s.append('user/message', { id: 'm-u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '问题' }] }, { surfaceOp: 'append' })
+  const a = s.append('assistant/message', {
+    turn: 1, step: 1, stream: [],
+    message: {
+      id: 'm-ar', role: 'assistant',
+      source: {
+        ...MODEL,
+        replayState: {
+          response: { kind: 'deepseek-messages', version: 1, model: 'probe' },
+          blocks: [{ type: 'reasoning', signature: 'REPLAY-SIG-X' }, { type: 'text' }],
+        },
+      },
+      content: [
+        { type: 'reasoning', text: '推理原文', signature: 'BLOCK-SIG-X' },
+        { type: 'text', text: '正文原文' },
+      ],
+    },
+  }, { surfaceOp: 'append' })
+  return { session: s, assistantSeq: a.seq }
+}
+
+test('真宿主折叠：改推理块 → 块签名与 replay 签名都被剥（模型侧不会带错签名）', () => {
+  const { session, assistantSeq } = makeSessionWithReplay()
+  const before = assistantMessage(session)
+  assert.equal(before.content[0].signature, 'BLOCK-SIG-X', '前提：未伪造时块上带签名')
+  assert.equal(before.source.replayState.blocks[0].signature, 'REPLAY-SIG-X', '前提：replay 元数据里也带签名')
+
+  session.append(PATCH_EVENT_TYPE, buildPatchData([{ seq: assistantSeq, blockIndex: 0, kind: 'reasoning', text: '伪造推理' }]))
+
+  const msg = assistantMessage(session)
+  assert.equal(msg.content[0].text, '伪造推理', '模型可见推理 = 伪造内容')
+  assert.equal('signature' in msg.content[0], false, '块签名必须剥掉（签名对的是原文）')
+  assert.equal('signature' in msg.source.replayState.blocks[0], false, 'replay 元数据里的签名也必须剥掉')
+  assert.equal(msg.source.replayState.blocks[1].type, 'text', '其余 replay 条目原样保留')
+})
+
+test('真宿主折叠：改正文 → replay 元数据一字不动（不误伤未改写的推理块）', () => {
+  const { session, assistantSeq } = makeSessionWithReplay()
+  session.append(PATCH_EVENT_TYPE, buildPatchData([{ seq: assistantSeq, blockIndex: 1, kind: 'text', text: '伪造正文' }]))
+  const msg = assistantMessage(session)
+  assert.equal(msg.content[1].text, '伪造正文')
+  assert.equal(msg.source.replayState.blocks[0].signature, 'REPLAY-SIG-X', '没改推理块就不该动它的签名')
+})
+
 // ── 运行 ──────────────────────────────────────────────────────────────
 let pass = 0
 for (const t of tests) {

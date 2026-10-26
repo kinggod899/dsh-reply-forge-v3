@@ -2262,6 +2262,103 @@ test('目标下拉选回自己这条：写入后页面立刻跟着变（不再�
   assert.ok(md.textContent.includes('（改过）'), '本机渲染必须跟着变，实际：' + md.textContent.slice(0, 80))
 })
 
+// ── BUG-7 钉子：刷新后覆盖必须还命中（键锚磁盘原文，不锚 DOM 文本）────────
+// 真机机制（2026-10-26 实证）：
+//   · 页面内 —— 宿主用**活会话**渲染，投影生效，DOM 上是伪造文本；
+//   · 刷新后 —— 宿主走 `dsh-session-query` 冷读，它的折叠用的是**硬编码**
+//     投影列表（`currentSessionMessageProjections = [imageOffloadProjection]`），
+//     插件投影进不去 → DOM 回到原文；
+//   · 于是「刷新后仍显示伪造」全靠 localStorage 覆盖表兜底。
+// 旧实现的键取「接管那一刻的 DOM 文本」——页面内那是**伪造文本**，刷新后拿
+// 原文算出的键在表里根本不存在 → 兜底失败 → 用户看到「刷新就恢复」。
+// 实测旧账：某会话 6 个被投影块原文键命中 0 个；伪造文本 "1" 的键反倒命中。
+
+/**
+ * 搭一条「页面文本 ≠ 磁盘原文」的会话，storage 可由外部传入以模拟刷新。
+ *
+ * @param {{storage?:object, domText:string, rawText:string, projectedText:string, seq?:number}} opts
+ */
+function setupProjected({ storage = {}, domText, rawText, projectedText, seq = 7 }) {
+  const doc = createDocument()
+  const { window: win, pending, flush } = createWindow({ storage, pathname: '/s/test-session' })
+  const conv = mk('div')
+  conv.setAttribute('data-slot', 'main.conversation')
+  conv.setAttribute('data-conversation-session', 'test-session')
+  const msg = mk('div', 'Kwoi6G_body')
+  msg.append(mk('p', '', domText))
+  conv.append(msg)
+  doc.body.append(conv)
+  const { calls, fetchImpl } = makeFetch({
+    blocks: [{ seq, blockIndex: 0, kind: 'text', text: projectedText, rawText }],
+    mode: 'live',
+    patched: projectedText !== rawText ? [{ seq, blockIndex: 0 }] : [],
+  })
+  return { doc, win, pending, flush, conv, msg, storage, calls, fetchImpl }
+}
+
+/** 页面上的 markdown 容器（覆盖渲染落在这里）。 */
+function mdOf(msg) {
+  return msg.children[0]
+}
+
+const ORIGINAL = '这是模型原本的回复原文，长度足够触发识别阈值并且超过最小值要求。'
+const FORGED_A = '第一版伪造内容：页面内活会话渲染时，宿主投影生效，DOM 上是这段伪造文本。'
+const FORGED_B = '第二版伪造内容：刷新之后也必须原样显示，不许退回原文。'
+
+test('BUG-7：页面内显示的是投影文本 → 改完刷新（冷读回原文）仍显示伪造', async () => {
+  const storage = {}
+  const projected = { storage, domText: FORGED_A, rawText: ORIGINAL, projectedText: FORGED_A }
+
+  // ① 页面内：DOM 是投影后的伪造文本（活会话路径）
+  const first = setupProjected(projected)
+  const mod1 = loadPlugin(first.doc, first.win, first.fetchImpl)
+  mod1.apply({ effect: () => {} })
+  await tick(); first.flush()
+
+  const editor = openEditor(first.msg)
+  const area = editor.querySelectorAll('textarea')[0]
+  area.value = FORGED_B
+  // 走「仅本机渲染」：只写覆盖，不碰会话记录（覆盖键的锚点问题在这里暴露）
+  const saveLocal = editor.children.find(c => c.classList.contains('rf3-btn') && c.textContent === '仅本机渲染')
+    ?? editor.querySelectorAll('.rf3-btn').find(b => b.textContent === '仅本机渲染')
+  assert.ok(saveLocal !== undefined, '必须有「仅本机渲染」按钮')
+  saveLocal.click()
+  await tick()
+
+  // 覆盖必须锚在磁盘原文上（而不是接管时的 DOM 文本）
+  const table = JSON.parse(storage['dsh-reply-forge-v3:test-session'] ?? '{}')
+  const keys = Object.keys(table)
+  assert.equal(keys.length, 1, '只该有一条覆盖，实际：' + JSON.stringify(keys))
+  assert.ok(keys[0].startsWith(ORIGINAL.length + ':'), '键必须是原文指纹（长度前缀 = 原文长度），实际：' + keys[0].slice(0, 40))
+  assert.ok(keys[0].includes(ORIGINAL.slice(0, 20)), '键的 head 必须是原文开头')
+  assert.equal(table[keys[0]].text, FORGED_B)
+
+  // ② 模拟刷新：新页面、同一 storage，宿主冷读把 DOM 渲染回原文
+  const second = setupProjected({ ...projected, domText: ORIGINAL })
+  const mod2 = loadPlugin(second.doc, second.win, second.fetchImpl)
+  mod2.apply({ effect: () => {} })
+  await tick(); second.flush(); await tick()
+
+  assert.ok(mdOf(second.msg).textContent.includes('第二版伪造内容'),
+    '刷新后必须仍显示伪造，实际：' + mdOf(second.msg).textContent.slice(0, 80))
+  assert.equal(mdOf(second.msg).textContent.includes('模型原本的回复原文'), false, '不许退回原文')
+})
+
+test('BUG-7 兜底：旧表里的键锚在 DOM 文本上，仍然认（不丢历史覆盖）', async () => {
+  // 旧实现写下的表：键 = 当时 DOM 文本（原文）的指纹
+  const legacyKey = (() => {
+    const norm = ORIGINAL.replace(/\s+/g, ' ').trim()
+    return norm.slice(0, 80).length + ':' + norm.slice(0, 80) + '|' + norm.slice(-40)
+  })()
+  const storage = { 'dsh-reply-forge-v3:test-session': JSON.stringify({ [legacyKey]: { text: FORGED_A, at: 1 } }) }
+  const page = setupProjected({ storage, domText: ORIGINAL, rawText: ORIGINAL, projectedText: ORIGINAL })
+  const mod = loadPlugin(page.doc, page.win, page.fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); page.flush(); await tick()
+  assert.ok(mdOf(page.msg).textContent.includes('第一版伪造内容'),
+    '旧键必须继续生效，实际：' + mdOf(page.msg).textContent.slice(0, 60))
+})
+
 // 执行（异步：落盘链路要走 promise）
 let failed = 0
 for (const t of tests) {
