@@ -107,9 +107,9 @@ function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, forgeS
 function setup({
   texts = [DEFAULT_TEXT], blocks = null, blocksLater = null, forgeResult = null, forgeSequence = null, confirmResult = true,
   sessionAttr = 'test-session', pathname = '/s/test-session', readError = null, mode = 'disk', patched = [], lineage = null,
+  storage = {},
 } = {}) {
   const doc = createDocument()
-  const storage = {}
   const { window: win, pending, flush, confirmCalls, dispatch } = createWindow({ storage, confirmResult, pathname })
   const conv = mk('div')
   conv.setAttribute('data-slot', 'main.conversation')
@@ -2357,6 +2357,101 @@ test('BUG-7 兜底：旧表里的键锚在 DOM 文本上，仍然认（不丢历
   await tick(); page.flush(); await tick()
   assert.ok(mdOf(page.msg).textContent.includes('第一版伪造内容'),
     '旧键必须继续生效，实际：' + mdOf(page.msg).textContent.slice(0, 60))
+})
+
+// ── BUG-8：新消息被套上了上一条的覆盖 ────────────────────────────────────
+//
+// 真机症状（2026-10-26 晚，会话 session-7806f695）：改掉倒数第二条回复后，
+// AI 新生成的那条**也显示着上次的伪造内容**，并且挂着「还原」按钮。
+//
+// 成因链：读路由给的 `text` 是**投影后**文本，宿主 UI 不渲染投影，所以页面
+// 上被伪造过的块显示的是**原文** → 只拿 `text` 建索引时它永远精确匹配不上
+// → 落到「末尾对齐兜底」（推断）→ 新消息一到，DOM 块数与记录块数不一致，
+// 新消息的块被兜底配到那条旧块上 → 拿它的 rawText 算覆盖键 → 命中旧覆盖。
+// 两处一起修：① 记录块的 rawText 也入索引，被伪造的块凭原文就能精确对回
+// 自己；② 覆盖键**只认精确匹配**，推断出来的配对不许当键。
+
+/** 覆盖表指纹（与 store.mjs 的 fingerprint 同口径）。 */
+function fpOf(text) {
+  const norm = String(text).replace(/\s+/g, ' ').trim()
+  return norm.slice(0, 80).length + ':' + norm.slice(0, 80) + '|' + norm.slice(-40)
+}
+
+test('BUG-8：记录还是旧快照时，新消息不许套用上一条的覆盖', async () => {
+  const NEW_MSG = '这是模型后来新生成的一条回复，跟上面那条毫无关系，长度也够触发识别阈值。'
+  // 覆盖表里只有「原文 → 第一版伪造」这一条（页面内伪造过 seq=46）
+  const storage = {
+    'dsh-reply-forge-v3:test-session': JSON.stringify({ [fpOf(ORIGINAL)]: { text: FORGED_A, at: 1 } }),
+  }
+  // 记录是**旧快照**：只有 seq=46 一条，新消息还没落盘
+  const page = setup({
+    texts: [ORIGINAL, NEW_MSG],
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: FORGED_A, rawText: ORIGINAL }],
+    storage,
+    mode: 'live',
+  })
+  const mod = loadPlugin(page.doc, page.win, page.fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); page.flush(); await tick()
+
+  const oldText = mdOf(page.msgs[0]).textContent
+  const newText = mdOf(page.msgs[1]).textContent
+  assert.ok(oldText.includes('第一版伪造内容'), '被伪造的那条必须显示它自己的覆盖，实际：' + oldText.slice(0, 60))
+  assert.equal(newText.includes('第一版伪造内容'), false,
+    '新消息绝不许套上一条的覆盖，实际：' + newText.slice(0, 80))
+  assert.ok(newText.includes('新生成的一条回复'), '新消息必须显示它自己的内容，实际：' + newText.slice(0, 80))
+
+  const bar = page.msgs[1].children.find(c => c.classList.contains('rf3-bar'))
+  assert.ok(bar !== undefined, '新消息仍要有操作条')
+  assert.equal(bar.querySelectorAll('button').some(b => b.textContent === '还原'), false,
+    '新消息不该挂「还原」按钮（它没有本机覆盖）')
+})
+
+test('BUG-8：末尾对齐只是推断，不许拿推断出来的原文当覆盖键', async () => {
+  const UNRELATED = '页面上这条内容跟磁盘记录完全对不上，只能靠末尾对齐被强行配对。'
+  const storage = {
+    'dsh-reply-forge-v3:test-session': JSON.stringify({ [fpOf(ORIGINAL)]: { text: FORGED_A, at: 1 } }),
+  }
+  const page = setup({
+    texts: [UNRELATED],
+    blocks: [{ seq: 46, blockIndex: 0, kind: 'text', text: FORGED_A, rawText: ORIGINAL }],
+    storage,
+    mode: 'live',
+  })
+  const mod = loadPlugin(page.doc, page.win, page.fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); page.flush(); await tick()
+  const text = mdOf(page.msg).textContent
+  assert.equal(text.includes('第一版伪造内容'), false,
+    '推断配对出来的 rawText 属于另一条消息，不许把它的覆盖画到这里，实际：' + text.slice(0, 80))
+  assert.ok(text.includes('只能靠末尾对齐'), '必须原样显示自己的内容，实际：' + text.slice(0, 80))
+})
+
+test('BUG-7 补充：记录后到 → 覆盖在键被纠正后补渲染', async () => {
+  // 首屏接管时记录还没到（match=null），键只能锚 DOM 文本；而 DOM 是**渲染
+  // 结果**（`## 标题` 在页面上只剩标题文字），跟磁盘 markdown 源码的指纹不同
+  // → 覆盖不命中。记录到达后键被纠正成磁盘原文，必须**补渲染**一次，否则表现
+  // 就是「改了不生效，得等宿主重渲染才出现」。
+  const TEXT = '这是标题内容足够长以触发识别阈值的一段文字。'
+  const RAW = '## ' + TEXT
+  const storage = {
+    'dsh-reply-forge-v3:test-session': JSON.stringify({ [fpOf(RAW)]: { text: FORGED_B, at: 1 } }),
+  }
+  const page = setup({
+    texts: [TEXT],
+    blocks: [],
+    blocksLater: [{ seq: 9, blockIndex: 0, kind: 'text', text: FORGED_A, rawText: RAW }],
+    storage,
+    mode: 'live',
+    patched: [{ seq: 9, blockIndex: 0 }],
+  })
+  const mod = loadPlugin(page.doc, page.win, page.fetchImpl)
+  mod.apply({ effect: () => {} })
+  for (let i = 0; i < 6; i += 1) { await tick(); page.flush() }
+
+  assert.ok(page.calls.filter(c => c.url.includes('/session/blocks')).length >= 2, '记录必须被重读过')
+  assert.ok(mdOf(page.msg).textContent.includes('第二版伪造内容'),
+    '记录到达、键纠正之后必须把覆盖渲染出来，实际：' + mdOf(page.msg).textContent.slice(0, 80))
 })
 
 // 执行（异步：落盘链路要走 promise）

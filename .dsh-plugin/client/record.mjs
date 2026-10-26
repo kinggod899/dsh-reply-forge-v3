@@ -177,7 +177,14 @@ export function recordNeedsRefresh(entry, domBlockCount, signature) {
  * 只加渲染形态会误伤思维链这类纯文本块：宿主可能按纯文本渲染，源码里的
  * `- ` / `#` 在页面上原样可见，规范化反倒把它们抹掉、从此对不上。
  *
- * @param {Array<{seq:number|null,blockIndex:number,text:string}>} diskBlocks 只读路由给的落盘块
+ * `block.rawText`（**未投影**的磁盘原文）也必须入索引——2026-10-26 BUG-8：
+ * 读路由给的 `text` 是**投影后**的文本，宿主 UI 却不渲染投影，所以刷新后页面
+ * 上是被伪造块的**原文**。只拿 `text` 建索引 → 被伪造过的块永远精确匹配不上
+ * → 落到末尾对齐兜底（推断）→ 一旦有新消息到达，新消息的块被错配到旧块上
+ * → 新消息显示上一条的伪造内容、还挂着「还原」按钮。
+ * 把 rawText 也入索引，被伪造的块就能凭原文精确对回自己，兜底不再被误用。
+ *
+ * @param {Array<{seq:number|null,blockIndex:number,text:string,rawText?:string}>} diskBlocks 只读路由给的落盘块
  * @param {string[]} domTexts 页面上按顺序的块文本
  * @param {{canonical?: (text:string)=>string}} [options]
  * @returns {Array<{seq:number|null,blockIndex:number,text:string,exact:boolean}|null>}
@@ -185,15 +192,23 @@ export function recordNeedsRefresh(entry, domBlockCount, signature) {
  */
 export function matchBlocks(diskBlocks, domTexts, options = {}) {
   const canonical = typeof options.canonical === 'function' ? options.canonical : null
-  /** 一个记录块可能匹配的键：源码原文，以及（可选）它的渲染后文本。 */
+  /** 一个记录块可能匹配的键：投影文本 / 未投影原文，各带（可选）渲染后形态。 */
   const keysOf = block => {
-    const raw = normalizeText(block.text)
-    if (canonical === null) return [raw]
-    const rendered = canonical(block.text)
-    // 规范化失败（渲染不出来）时只留源码键，别把整块当成空串。
-    if (rendered === '') return [raw]
-    const norm = normalizeText(rendered)
-    return norm === raw ? [raw] : [raw, norm]
+    const out = []
+    const push = text => {
+      if (typeof text !== 'string') return
+      const raw = normalizeText(text)
+      if (raw !== '' && out.includes(raw) === false) out.push(raw)
+      if (canonical === null) return
+      const rendered = canonical(text)
+      // 规范化失败（渲染不出来）时只留源码键，别把整块当成空串。
+      if (rendered === '') return
+      const norm = normalizeText(rendered)
+      if (norm !== '' && out.includes(norm) === false) out.push(norm)
+    }
+    push(block.text)
+    if (block.rawText !== block.text) push(block.rawText)
+    return out.length === 0 ? [normalizeText(block.text)] : out
   }
   const out = domTexts.map(() => null)
   const used = new Set()
@@ -211,10 +226,11 @@ export function matchBlocks(diskBlocks, domTexts, options = {}) {
     if (key === '') return
     const list = byText.get(key)
     if (list === undefined) return
-    // 跳过已被前面同文本块占用掉的候选。
-    while (list.length > 0 && used.has(list[0])) list.shift()
-    if (list.length === 0) return
-    const bi = list.shift()
+    // 跳过已被前面同文本块占用掉的候选（一个记录块可能挂在多个键下，
+    // 占用位未必在队首，所以用 findIndex 找第一个还没被占的）。
+    const pos = list.findIndex(i => used.has(i) === false)
+    if (pos < 0) return
+    const bi = list.splice(pos, 1)[0]
     used.add(bi)
     out[di] = { ...diskBlocks[bi], exact: true }
   })
