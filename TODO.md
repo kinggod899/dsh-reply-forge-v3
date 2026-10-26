@@ -29,12 +29,17 @@
   那一层要宿主把插件投影纳入冷读路径，目前无公开入口。
   **采信不受影响**：patch 事件在会话文件里，模型请求走活会话的注册表投影
   （真机自检实测 2 处 `this.projections`，硬编码列表未侵入）——与浏览器存储无关。
-  **当前落地状态（10-26）**：分支 `fix/refresh-restores-forged` 已提交并推送
-  （commit `294857e`，基线 `a6deb02` = origin/main 顶端，15 文件 +536/−25），
-  门禁 `build-client --check` OK / 417 项 17 套全绿 / verify-host PASS 27·WARN 0·FAIL 0。
-  **PR #18 已开（10-26）**：https://github.com/kinggod899/dsh-reply-forge-v3/pull/18
-  （2 commit / 15 文件 +543−25，`mergeable=true`、`mergeable_state=clean`，仓库无 CI）。
-  **发行仍暂缓**：v3.4.2 先攒批，等后续改动一起走发布循环。
+  **当前落地状态（10-26）**：**已合并进 main**。
+  PR [#18](https://github.com/kinggod899/dsh-reply-forge-v3/pull/18) →
+  merge commit `f7a4889`（3 commit / 15 文件 +545−25，merge commit 未 squash），
+  分支 `fix/refresh-restores-forged` 已删。
+  门禁（main 上复跑）：`build-client --check` OK / **17 套全绿** /
+  `verify-host` **PASS 27 · WARN 0 · FAIL 0**。
+  合并后补一条 `18a1848`（test）：`loadBaseline` 那条断言原本钉死 `0.2.1-rc.2`，
+  登记 rc.3 会连带失败——改为版本**形态**匹配（`^\d+\.\d+\.\d+(-[\w.]+)?$`），
+  真正的版本校验留给 verify-host T0（基线 vs 本机实测）。
+  **发行仍暂缓**：v3.4.2 只存在于代码里（main 的 `package.json` 已是 3.4.2，
+  但没打 tag、没发 npm、没建 Release），等后续改动一起走发布循环。
   攒批注意两点：① `host-baseline.json` 已登记到 `0.2.1-rc.3`，别被新宿主再次漂移
   覆盖；② 该修复只对**新写入**生效，旧伪造块磁盘里无 `rawText` 锚点，需重写一次
   才会落到新键上（不是回归）。
