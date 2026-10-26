@@ -42,7 +42,9 @@ function makeAsar(files, data) {
 
 test('loadBaseline：读仓库内真基线，四段齐全', () => {
   const baseline = loadBaseline(REPO)
-  assert.equal(baseline.host.version, '0.2.1-rc.2')
+  // 版本号故意不写死：登记新宿主版本（改 host-baseline.json）是正常动作，
+  // 不该连带改测试。真正的版本校验在 verify-host T0（基线 vs 本机实测）。
+  assert.match(baseline.host.version, /^\d+\.\d+\.\d+(?:-[\w.]+)?$/)
   assert.equal(baseline.host.hostProtocolVersion, 4)
   assert.ok(baseline.packages['@deepseek-ai/dsh-session'])
   assert.ok(baseline.contract.migrationRenamesOpaqueToPrefix === 'plugin:')
