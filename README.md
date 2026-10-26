@@ -236,13 +236,13 @@ node tests/session-anatomy.test.mjs
 node tests/verify-host.test.mjs  # 升级自检脚本自身（asar 配方 / 基线比对 / 输出解析）
 ```
 
-共 **395 项 / 17 套**（含 P0 的 `ignorable` 28 项、`persistence` 真宿主闭环 5 项、
+共 **423 项 / 17 套**（含 P0 的 `ignorable` 29 项、`persistence` 真宿主闭环 5 项、
 `session-repair` 15 项、v3.4 的 `lineage` 22 项、v3.4.1 的 `migration-rename` 5 项、
-升级自检自身 `verify-host` 17 项）。
-其中 **29 项**（`projection` 16 + `migration-rename` 5 + `persistence` 5 +
+升级自检自身 `verify-host` 21 项）。
+其中 **31 项**（`projection` 18 + `migration-rename` 5 + `persistence` 5 +
 `ignorable` 3）需要本机装有宿主包 `@deepseek-ai/dsh-session` 及 codec 链——找不到就 SKIP、不计失败
-（此态执行 366 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
-完整 395 项全跑。
+（此态执行 392 项），所以发行包在没装 DSH 的机器上也能跑绿；装了宿主的机器上才是
+完整 423 项全跑。
 跑法：逐个 `node tests/<文件>`，或 `node --test "tests/*.test.mjs"` 看总门禁。改过
 `.dsh-plugin/client/*.mjs` 后必须重跑 `node scripts/build-client.mjs`（自研内联器，
 零依赖 / 无 JSX / 无 export default），`build.test.mjs` 会校验产物与源码一致。

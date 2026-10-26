@@ -244,14 +244,14 @@ node tests/session-anatomy.test.mjs
 node tests/verify-host.test.mjs  # the upgrade self-check itself (asar recipe / baseline compare / output parsing)
 ```
 
-**395 assertions in 17 suites** — including P0's `ignorable` (28), the real-host
+**423 assertions in 17 suites** — including P0's `ignorable` (29), the real-host
 persistence loop (5), `session-repair` (15), v3.4's `lineage` (22), v3.4.1's
-`migration-rename` (5) and the upgrade self-check's own `verify-host` (17).
-**29 of them** (`projection` 16 + `migration-rename` 5 +
+`migration-rename` (5) and the upgrade self-check's own `verify-host` (21).
+**31 of them** (`projection` 18 + `migration-rename` 5 +
 `persistence` 5 + `ignorable` 3) need the host package `@deepseek-ai/dsh-session`
 and its codec chain installed; without it they SKIP (not fail), so the release
-zip stays green on machines without DSH (366 assertions execute in that mode) — with a
-host present, all 395 run.
+zip stays green on machines without DSH (392 assertions execute in that mode) — with a
+host present, all 423 run.
 Or just run the gate:
 
 ```bash
